@@ -1,0 +1,48 @@
+General_features{
+
+analog voltmeter across battery?
+
+
+}
+
+
+statup{
+
+find orientation
+test wheels and brakes?
+
+
+
+present user with choices of programs
+  find moment of inertia
+  flip cube in "circle" 
+  balance cube on edge
+
+}
+
+moment_of_inertia{
+
+  1) have user tilt cube up to certain angle on one axis
+    a) prompted by UI via bluetooth
+  2) have user drop cube
+  3) have cube use accel/gyro to sense when cube is dropped
+  4) use onboard timers to get precise measurment of time
+  5) repeat as needed on all axis to calculate 
+  
+}
+
+
+flip_cube_in_circle{
+
+spin up individual wheels and brake them causing the cube to flip over each face one at a time
+
+}
+
+
+balance_cube_on_edge{
+
+
+//this is the hard one//
+
+
+}
