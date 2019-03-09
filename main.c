@@ -85,12 +85,13 @@ static void MX_USART2_UART_Init(void);
 //Stuff for Bluetooth
 uint8_t dataRX[10];
 uint8_t dataTX[100];
+uint8_t loopCount;
 
 //Stuff for MPU
 uint8_t i2cBuff[15];
-uint16_t mpu6050Address = 0x68;
+uint16_t mpu6050Address = 0xD0;
 int16_t gx,gy,gz,ax,ay,az;
-float Xang, Yang, Zang;
+float Xang, Yang, ZangVel, XangVel, YangVel, Zang, Xacc, Yacc, Zacc;
 uint8_t outstrX[10];
 uint8_t outstrY[10];
 uint8_t outstrZ[10];
@@ -128,16 +129,6 @@ int main(void)
   MX_I2C1_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
-  for(uint8_t i=0 ; i<255; i++)
-    {
-        if(HAL_I2C_IsDeviceReady(&hi2c1, i, 1, 10) == HAL_OK )
-        {
-           HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, 1);
-           mpu6050Address = i;
-           break;
-        }
-     }
 
   //Wake up MPU
   i2cBuff[0] = 0x6B;
@@ -181,42 +172,60 @@ int main(void)
 	  gx +=  485; //X-Offset
 	  gy += -104; //Y-Offset
 	  gz += -100; //Z-Offset
+	  ax += 82; //X-Offset
+	  ay += 655; //Y-Offset
+	  az += 1802; //Z-Offset
 
-	  Xang = ((float)gx / 32768) * 250;
-	  Yang = ((float)gy / 32768) * 250;
-	  Zang = ((float)gz / 32768) * 250;
+	  //Convert to deg/sec
+	  XangVel = ((float)gx / 32768) * 250;
+	  YangVel = ((float)gy / 32768) * 250;
+	  ZangVel = ((float)gz / 32768) * 250;
 
+	  //Integrate angular velocities
+	  Xang += XangVel * 0.01; //Using a sampling rate of 10 ms
+	  Yang += YangVel * 0.01;
+	  Zang += ZangVel * 0.01;
+
+	  //Convert to g
+	  Xacc = ((float)ax / 32768) * 2;
+	  Yacc = ((float)ay / 32768) * 2;
+	  Zacc = ((float)az / 32768) * 2;
+
+	  if (loopCount == 0) {
 	  //Send info to Bluetooth for testing purposes
 	  //There is no support for printing floats in the STM32
 	  //This converts the floats to a series of three ints
-	  char *XSign = (Xang < 0) ? "-" : "";
-	  float XVal = (Xang < 0) ? -Xang : Xang;
+	  char *XSign = (Xacc < 0) ? "-" : "";
+	  float XVal = (Xacc < 0) ? -Xacc : Xacc;
 	  int XInt1 = XVal;                      // Get the integer
 	  float XFrac = XVal - XInt1;            // Get fraction
 	  int XInt2 = trunc(XFrac * 100);        // Turn into integer
 
-	  char *YSign = (Yang < 0) ? "-" : "";
-	  float YVal = (Yang < 0) ? -Yang : Yang;
+	  char *YSign = (Yacc < 0) ? "-" : "";
+	  float YVal = (Yacc < 0) ? -Yacc : Yacc;
 	  int YInt1 = YVal;                      // Get the integer
 	  float YFrac = YVal - YInt1;            // Get fraction
 	  int YInt2 = trunc(YFrac * 100);        // Turn into integer
 
-	  char *ZSign = (Zang < 0) ? "-" : "";
-	  float ZVal = (Zang < 0) ? -Zang : Zang;
+	  char *ZSign = (Zacc < 0) ? "-" : "";
+	  float ZVal = (Zacc < 0) ? -Zacc : Zacc;
 	  int ZInt1 = ZVal;                      // Get the integer
 	  float ZFrac = ZVal - ZInt1;            // Get fraction
 	  int ZInt2 = trunc(ZFrac * 100);        // Turn into integer
 
-	  sprintf(dataTX, "Xang = %s%d.%02d, Yang = %s%d.%02d, Zang = %s%d.%02d\n",
-			  XSign, XInt1, XInt2, YSign, YInt1, YInt2, ZSign, ZInt1, ZInt2);
+	  sprintf(dataTX, "Xacc = %s%d.%02d, Yacc = %s%d.%02d, Zacc = %s%d.%02d\n",
+	  		  XSign, XInt1, XInt2, YSign, YInt1, YInt2, ZSign, ZInt1, ZInt2);
+
 
 	  //Send Bluetooth
 	  //HAL_UART_Receive(&huart2, dataRX, 10, 1000);
 	  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
+	  }
+	  loopCount++;
 
 	  //For testing
 	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, 0);
-	  HAL_Delay(1000);
+	  HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
