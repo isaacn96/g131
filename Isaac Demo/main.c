@@ -92,6 +92,9 @@ uint8_t dataTX[100];
 uint8_t i2cBuff[15];
 uint16_t mpu6050Address = 0xD0;
 int16_t gx,gy,gz,ax,ay,az;
+int32_t gxOff, gyOff, gzOff;
+int32_t axOff, ayOff, azOff;
+uint16_t loop;
 double Xang, Yang, Zang, ZangVel;
 double XangVel, YangVel, Xacc, Yacc, Zacc;
 double XgyroAng, YgyroAng, ZgyroAng, XaccAng, YaccAng, ZaccAng;
@@ -99,6 +102,19 @@ float alpha = 0.02;
 uint8_t outstrX[10];
 uint8_t outstrY[10];
 uint8_t outstrZ[10];
+
+//For printing the angles
+char *XGyrSign, *YGyrSign, *ZGyrSign;
+float XGyrVal, YGyrVal, ZGyrVal;
+int XGyrInt1, YGyrInt1, ZGyrInt1;
+float XGyrFrac, YGyrFrac, ZGyrFrac;
+int XGyrInt2, YGyrInt2, ZGyrInt2;
+
+char *XAccSign, *YAccSign, *ZAccSign;
+float XAccVal, YAccVal, ZAccVal;
+int XAccInt1, YAccInt1, ZAccInt1;
+float XAccFrac, YAccFrac, ZAccFrac;
+int XAccInt2, YAccInt2, ZAccInt2;
 
 /* USER CODE END 0 */
 
@@ -136,17 +152,27 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   //Wake up MPU
-  //i2cBuff[0] = 0x6B;
-  //i2cBuff[1] = 0x00;
-  //HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
+  i2cBuff[0] = 0x6B;
+  i2cBuff[1] = 0x00;
+  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
 
   //Set Gyro Range
-  //i2cBuff[0] = 0x27;
-  //i2cBuff[1] = 0x00;
-  //HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
+  i2cBuff[0] = 0x27;
+  i2cBuff[1] = 0x00;
+  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
 
   //Get data from Bluetooth
+  sprintf(dataTX, "\nPress any Button to Start.\r\n");
+  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
+  sprintf(dataRX, "______");
   HAL_UART_Receive_DMA(&huart2, dataRX, 6);
+
+  gxOff = 0; //X-Offset
+  gyOff = 0; //Y-Offset
+  gzOff = 0; //Z-Offset
+  axOff = 0; //X-Offset
+  ayOff = 0; //Y-Offset
+  azOff = 0; //Z-Offset
 
   /* USER CODE END 2 */
 
@@ -162,7 +188,7 @@ int main(void)
 	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, 1);
 
 	  //Get gyroscope info
-	  i2cBuff[0]= 0x3B; //Gyroscope addresses
+	  i2cBuff[0]= 0x3B; //Accelerometer addresses
 	  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
 	  i2cBuff[1] = 0x00;
 	  HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
@@ -176,12 +202,12 @@ int main(void)
 	  gz = (i2cBuff[13]<<8 | i2cBuff[14]);
 
 	  //Add offsets
-	  gx +=  480; //X-Offset
-	  gy += -100; //Y-Offset
-	  gz += -100; //Z-Offset
-	  ax += -700; //X-Offset
-	  ay +=  650; //Y-Offset
-	  az += 1800; //Z-Offset
+	  gx +=  gxOff; //X-Offset
+	  gy +=  gyOff; //Y-Offset
+	  gz +=  gzOff; //Z-Offset
+	  ax +=  axOff; //X-Offset
+	  ay +=  ayOff; //Y-Offset
+	  az +=  azOff; //Z-Offset
 
 	  //Convert angular velocities to deg/sec
 	  XangVel = ((double)gx / 32768) * 250;
@@ -199,87 +225,160 @@ int main(void)
 	  Zacc = ((double)az / 32768) * 2;
 
 	  //Find angle from direction of gravitational acceleration
-	  XaccAng = atan2(Xacc, sqrt((Yacc * Yacc) + (Zacc * Zacc))) * 57.2958;
+	  /*XaccAng = atan2(Xacc, sqrt((Yacc * Yacc) + (Zacc * Zacc))) * 57.2958;
 	  YaccAng = atan2(Yacc, sqrt((Xacc * Xacc) + (Zacc * Zacc))) * 57.2958;
-	  ZaccAng = atan2(sqrt((Xacc * Xacc) + (Yacc * Yacc)), Zacc) * 57.2958;
+	  ZaccAng = atan2(sqrt((Xacc * Xacc) + (Yacc * Yacc)), Zacc) * 57.2958;*/
+
+	  //Find angle from direction of gravitational acceleration using other formula
+	  XaccAng = atan2(Yacc, Zacc) * 57.2958;
+	  YaccAng = atan2(Xacc, Zacc) * 57.2958;
+	  ZaccAng = atan2(Xacc, Yacc) * 57.2958;
 
 	  //Get the filtered angles
 	  Xang = ((1.0 - alpha) * XgyroAng) + (alpha * XaccAng);
 	  Yang = ((1.0 - alpha) * YgyroAng) + (alpha * YaccAng);
 	  Zang = ((1.0 - alpha) * ZgyroAng) + (alpha * ZaccAng);
 
-	  //Send info to Bluetooth for testing purposes
+	  //Calibrate
+	  if (strcmp(dataRX, "CALB\r\n") == 0) {
+
+		  //Send confirmation to Bluetooth
+		  sprintf(dataTX, "Calibration Starting....\r\n");
+		  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
+		  sprintf(dataRX, "______");
+
+		  gxOff = 480; //X-Offset
+		  gyOff = -100; //Y-Offset
+		  gzOff = -100; //Z-Offset
+		  axOff = -700; //X-Offset
+		  ayOff = 650; //Y-Offset
+		  azOff = 1800; //Z-Offset
+
+		  XgyroAng = 0;
+		  YgyroAng = 0;
+		  ZgyroAng = 0;
+
+
+		  //Burn 100 read cycles
+		  for (loop = 0; loop < 100; loop++){
+			  i2cBuff[0]= 0x3B; //Accelerometer addresses
+			  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
+			  i2cBuff[1] = 0x00;
+			  HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
+		  }
+
+		  //Average the next 1000 reads
+		  for (loop = 0; loop < 1000; loop++){
+		  	  i2cBuff[0]= 0x3B; //Accelerometer addresses
+		  	  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
+		      i2cBuff[1] = 0x00;
+		      HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
+
+		      ax = (i2cBuff[1]<<8  |  i2cBuff[2]);
+		      ay = (i2cBuff[3]<<8  |  i2cBuff[4]);
+		      az = (i2cBuff[5]<<8  |  i2cBuff[6]);
+		      gx = (i2cBuff[9]<<8  | i2cBuff[10]);
+		      gy = (i2cBuff[11]<<8 | i2cBuff[12]);
+		      gz = (i2cBuff[13]<<8 | i2cBuff[14]);
+
+		      //Find running count
+		      axOff += ax;
+		      ayOff += ay;
+		      azOff += (16384 - az);
+		      gxOff += gx;
+		      gyOff += gy;
+		      gzOff += gz;
+		  }
+
+		  //Find the averages
+		  axOff /= 1000;
+		  ayOff /= 1000;
+		  azOff /= 1000;
+		  gxOff /= 1000;
+		  gyOff /= 1000;
+		  gzOff /= 1000;
+
+		  //Send confirmation of calibration to Bluetooth
+		  sprintf(dataTX, "Finished!\nCalibration Offsets are: axOff=%d, ayOff=%d, azOff=%d, gxOff=%d, gyOff=%d, gzOff=%d\r\n",
+				  axOff, ayOff, azOff, gxOff, gyOff, gzOff);
+		  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
+		  sprintf(dataRX, "______");
+	  }
+
+
+	  //Send angle info to Bluetooth for testing purposes
 	  if (strcmp(dataRX, "SEND\r\n") == 0) {
 		  //Clear RX buffer
 		  //sprintf(dataRX, "______");
 
 		  //This converts the floats to a series of three ints,
 		  //As there is no support for printing floats in the STM32
-		  char *XSign = (XaccAng < 0) ? "-" : "";
-		  float XVal = (XaccAng < 0) ? -XaccAng : XaccAng;
-		  int XInt1 = XVal;                      // Get the integer
-		  float XFrac = XVal - XInt1;            // Get fraction
-		  int XInt2 = trunc(XFrac * 100);        // Turn into integer
+		  XGyrSign = (XgyroAng < 0) ? "-" : " ";
+		  XGyrVal = (XgyroAng < 0) ? -XgyroAng : XgyroAng;
+		  XGyrInt1 = XGyrVal;                      // Get the integer
+		  XGyrFrac = XGyrVal - XGyrInt1;            // Get fraction
+		  XGyrInt2 = trunc(XGyrFrac * 100);        // Turn into integer
 
-		  char *YSign = (YaccAng < 0) ? "-" : "";
-		  float YVal = (YaccAng < 0) ? -YaccAng : YaccAng;
-		  int YInt1 = YVal;                      // Get the integer
-		  float YFrac = YVal - YInt1;            // Get fraction
-		  int YInt2 = trunc(YFrac * 100);        // Turn into integer
+		  YGyrSign = (YgyroAng < 0) ? "-" : " ";
+		  YGyrVal = (YgyroAng < 0) ? -YgyroAng : YgyroAng;
+		  YGyrInt1 = YGyrVal;                      // Get the integer
+		  YGyrFrac = YGyrVal - YGyrInt1;            // Get fraction
+		  YGyrInt2 = trunc(YGyrFrac * 100);        // Turn into integer
 
-		  char *ZSign = (ZaccAng < 0) ? "-" : "";
-		  float ZVal = (ZaccAng < 0) ? -ZaccAng : ZaccAng;
-		  int ZInt1 = ZVal;                      // Get the integer
-		  float ZFrac = ZVal - ZInt1;            // Get fraction
-		  int ZInt2 = trunc(ZFrac * 100);        // Turn into integer
+		  ZGyrSign = (ZgyroAng < 0) ? "-" : " ";
+		  ZGyrVal = (ZgyroAng < 0) ? -ZgyroAng : ZgyroAng;
+		  ZGyrInt1 = ZGyrVal;                      // Get the integer
+		  ZGyrFrac = ZGyrVal - ZGyrInt1;            // Get fraction
+		  ZGyrInt2 = trunc(ZGyrFrac * 100);        // Turn into integer
 
-		  //sprintf(dataTX, "Xacc = %s%d.%02d, Yacc = %s%d.%02d, Zacc = %s%d.%02d\r\n",
-			// 	  XSign, XInt1, XInt2, YSign, YInt1, YInt2, ZSign, ZInt1, ZInt2);
+		  //sprintf(dataTX, "%s%d.%02d, %s%d.%02d, %s%d.%02d, \r\n",
+			// 	  XGyrSign, XGyrInt1, XGyrInt2, YGyrSign, YGyrInt1, YGyrInt2, ZGyrSign, ZGyrInt1, ZGyrInt2);
 
 		  //sprintf(dataTX, "Xacc = %d, Yacc = %d, Zacc = %d\r\n", ax, ay, az);
 		  //Send Bluetooth
-		  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
+		  //HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
 
 		  //This converts the floats to a series of three ints
-		  XSign = (XgyroAng < 0) ? "-" : "";
-		  XVal = (XgyroAng < 0) ? -XgyroAng : XgyroAng;
-		  XInt1 = XVal;                      // Get the integer
-		  XFrac = XVal - XInt1;              // Get fraction
-		  XInt2 = trunc(XFrac * 100);        // Turn into integer
+		  XAccSign = (XaccAng < 0) ? "-" : " ";
+		  XAccVal = (XaccAng < 0) ? -XaccAng : XaccAng;
+		  XAccInt1 = XAccVal;                      // Get the integer
+		  XAccFrac = XAccVal - XAccInt1;              // Get fraction
+		  XAccInt2 = trunc(XAccFrac * 100);        // Turn into integer
 
-		  YSign = (YgyroAng < 0) ? "-" : "";
-		  YVal = (YgyroAng < 0) ? -YgyroAng : YgyroAng;
-		  YInt1 = YVal;                      // Get the integer
-		  YFrac = YVal - YInt1;              // Get fraction
-		  YInt2 = trunc(YFrac * 100);        // Turn into integer
+		  YAccSign = (YaccAng < 0) ? "-" : " ";
+		  YAccVal = (YaccAng < 0) ? -YaccAng : YaccAng;
+		  YAccInt1 = YAccVal;                      // Get the integer
+		  YAccFrac = YAccVal - YAccInt1;              // Get fraction
+		  YAccInt2 = trunc(YAccFrac * 100);        // Turn into integer
 
-		  ZSign = (ZgyroAng < 0) ? "-" : "";
-		  ZVal = (ZgyroAng < 0) ? -ZgyroAng : ZgyroAng;
-		  ZInt1 = ZVal;                      // Get the integer
-		  ZFrac = ZVal - ZInt1;              // Get fraction
-		  ZInt2 = trunc(ZFrac * 100);        // Turn into integer
+		  ZAccSign = (ZaccAng < 0) ? "-" : " ";
+		  ZAccVal = (ZaccAng < 0) ? -ZaccAng : ZaccAng;
+		  ZAccInt1 = ZAccVal;                      // Get the integer
+		  ZAccFrac = ZAccVal - ZAccInt1;              // Get fraction
+		  ZAccInt2 = trunc(ZAccFrac * 100);        // Turn into integer
 
-		  //sprintf(dataTX, "Xgyr = %s%d.%02d, Ygyr = %s%d.%02d, Zgyr = %s%d.%02d\r\n",
-		//		    XSign, XInt1, XInt2, YSign, YInt1, YInt2, ZSign, ZInt1, ZInt2);
+		  sprintf(dataTX, "%s%d.%02d,%s%d.%02d,%s%d.%02d, %s%d.%02d,%s%d.%02d,%s%d.%02d\r\n",
+				  XGyrSign, XGyrInt1, XGyrInt2, YGyrSign, YGyrInt1, YGyrInt2, ZGyrSign, ZGyrInt1, ZGyrInt2,
+				  XAccSign, XAccInt1, XAccInt2, YAccSign, YAccInt1, YAccInt2, ZAccSign, ZAccInt1, ZAccInt2);
 
 		  //sprintf(dataTX, "Xang = %d, Yang = %d, Zang = %d\r\n", gx, gy, gz);
 		  //Send Bluetooth
 		  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
 
 		  //This converts the floats to a series of three ints
-		  XSign = (Xang < 0) ? "-" : "";
+		  /*XSign = (Xang < 0) ? "-" : " ";
 		  XVal = (Xang < 0) ? -Xang : Xang;
 		  XInt1 = XVal;                      // Get the integer
 		  XFrac = XVal - XInt1;              // Get fraction
 		  XInt2 = trunc(XFrac * 100);        // Turn into integer
 
-		  YSign = (Yang < 0) ? "-" : "";
+		  YSign = (Yang < 0) ? "-" : " ";
 		  YVal = (Yang < 0) ? -Yang : Yang;
 		  YInt1 = YVal;                      // Get the integer
 		  YFrac = YVal - YInt1;              // Get fraction
 		  YInt2 = trunc(YFrac * 100);        // Turn into integer
 
-		  ZSign = (Zang < 0) ? "-" : "";
+		  ZSign = (Zang < 0) ? "-" : " ";
 		  ZVal = (Zang < 0) ? -Zang : Zang;
 		  ZInt1 = ZVal;                      // Get the integer
 		  ZFrac = ZVal - ZInt1;              // Get fraction
@@ -289,7 +388,7 @@ int main(void)
 		   		  XSign, XInt1, XInt2, YSign, YInt1, YInt2, ZSign, ZInt1, ZInt2);
 
 		  //Send Bluetooth
-		  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
+		  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);*/
 	  }
 
 	  //For testing
