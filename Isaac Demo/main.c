@@ -64,8 +64,12 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
-UART_HandleTypeDef huart2;
-DMA_HandleTypeDef hdma_usart2_rx;
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
+
+UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_rx;
 
 /* USER CODE BEGIN PV */
 
@@ -76,13 +80,19 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
-static void MX_USART2_UART_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_TIM2_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
-
+void Calibrate(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+uint8_t sendCount;
+uint32_t mainCountPrev, mainCountCurr, mainCount;
 
 //Stuff for Bluetooth
 uint8_t dataRX[6];
@@ -95,15 +105,22 @@ int16_t gx,gy,gz,ax,ay,az;
 int32_t gxOff, gyOff, gzOff;
 int32_t axOff, ayOff, azOff;
 uint16_t loop;
-double Xang, Yang, Zang, ZangVel;
-double XangVel, YangVel, Xacc, Yacc, Zacc;
+double Xang, Yang, Zang;
+double XangVel, YangVel, ZangVel, Xacc, Yacc, Zacc;
+double XDegree, YDegree, ZDegree;
 double XgyroAng, YgyroAng, ZgyroAng, XaccAng, YaccAng, ZaccAng;
 float alpha = 0.02;
 uint8_t outstrX[10];
 uint8_t outstrY[10];
 uint8_t outstrZ[10];
 
-//For printing the angles
+//Stuff for printing the angles
+char *XSign, *YSign, *ZSign;
+float XVal, YVal, ZVal;
+int XInt1, YInt1, ZInt1;
+float XFrac, YFrac, ZFrac;
+int XInt2, YInt2, ZInt2;
+
 char *XGyrSign, *YGyrSign, *ZGyrSign;
 float XGyrVal, YGyrVal, ZGyrVal;
 int XGyrInt1, YGyrInt1, ZGyrInt1;
@@ -148,8 +165,16 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_I2C1_Init();
-  MX_USART2_UART_Init();
+  MX_USART1_UART_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+
+  //Begin PWM
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
 
   //Wake up MPU
   i2cBuff[0] = 0x6B;
@@ -163,16 +188,17 @@ int main(void)
 
   //Get data from Bluetooth
   sprintf(dataTX, "\nPress any Button to Start.\r\n");
-  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
+  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
   sprintf(dataRX, "______");
-  HAL_UART_Receive_DMA(&huart2, dataRX, 6);
+  HAL_UART_Receive_DMA(&huart1, dataRX, 6);
 
-  gxOff = 0; //X-Offset
-  gyOff = 0; //Y-Offset
-  gzOff = 0; //Z-Offset
-  axOff = 0; //X-Offset
-  ayOff = 0; //Y-Offset
-  azOff = 0; //Z-Offset
+  //Set initial offsets
+  gxOff = -480; //X-Offset
+  gyOff = 100; //Y-Offset
+  gzOff = 100; //Z-Offset
+  axOff = 700; //X-Offset
+  ayOff = -650; //Y-Offset
+  azOff = -1800; //Z-Offset
 
   /* USER CODE END 2 */
 
@@ -183,6 +209,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	  //__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 1500);
+	  //__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 1000000);
 
 	  //For testing
 	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, 1);
@@ -190,34 +218,24 @@ int main(void)
 	  //Get gyroscope info
 	  i2cBuff[0]= 0x3B; //Accelerometer addresses
 	  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
+
 	  i2cBuff[1] = 0x00;
 	  HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
 
 	  ax = (i2cBuff[1]<<8 | i2cBuff[2]);
 	  ay = (i2cBuff[3]<<8 | i2cBuff[4]);
 	  az = (i2cBuff[5]<<8 | i2cBuff[6]);
-
 	  gx = (i2cBuff[9]<<8  | i2cBuff[10]);
 	  gy = (i2cBuff[11]<<8 | i2cBuff[12]);
 	  gz = (i2cBuff[13]<<8 | i2cBuff[14]);
 
-	  //Add offsets
-	  gx +=  gxOff; //X-Offset
-	  gy +=  gyOff; //Y-Offset
-	  gz +=  gzOff; //Z-Offset
-	  ax +=  axOff; //X-Offset
-	  ay +=  ayOff; //Y-Offset
-	  az +=  azOff; //Z-Offset
-
-	  //Convert angular velocities to deg/sec
-	  XangVel = ((double)gx / 32768) * 250;
-	  YangVel = ((double)gy / 32768) * 250;
-	  ZangVel = ((double)gz / 32768) * 250;
-
-	  //Integrate angular velocities
-	  XgyroAng += XangVel * 0.01; //Using a sampling rate of 10 ms
-	  YgyroAng += YangVel * 0.01;
-	  ZgyroAng += ZangVel * 0.01;
+	  //Subtract offsets
+	  gx -=  gxOff; //X-Offset
+	  gy -=  gyOff; //Y-Offset
+	  gz -=  gzOff; //Z-Offset
+	  ax -=  axOff; //X-Offset
+	  ay -=  ayOff; //Y-Offset
+	  az -=  azOff; //Z-Offset
 
 	  //Convert accelerations to g's
 	  Xacc = ((double)ax / 32768) * 2;
@@ -225,39 +243,72 @@ int main(void)
 	  Zacc = ((double)az / 32768) * 2;
 
 	  //Find angle from direction of gravitational acceleration
-	  /*XaccAng = atan2(Xacc, sqrt((Yacc * Yacc) + (Zacc * Zacc))) * 57.2958;
-	  YaccAng = atan2(Yacc, sqrt((Xacc * Xacc) + (Zacc * Zacc))) * 57.2958;
-	  ZaccAng = atan2(sqrt((Xacc * Xacc) + (Yacc * Yacc)), Zacc) * 57.2958;*/
+	  XaccAng = atan2(Yacc, sqrt((Xacc * Xacc) + (Zacc * Zacc))) * 57.2958;
+	  YaccAng = -atan2(Xacc, sqrt((Yacc * Yacc) + (Zacc * Zacc))) * 57.2958;
+	  ZaccAng = atan2(Zacc, sqrt((Xacc * Xacc) + (Yacc * Yacc))) * 57.2958;
 
 	  //Find angle from direction of gravitational acceleration using other formula
-	  XaccAng = atan2(Yacc, Zacc) * 57.2958;
-	  YaccAng = atan2(Xacc, Zacc) * 57.2958;
-	  ZaccAng = atan2(Xacc, Yacc) * 57.2958;
+	  //XaccAng = atan2(Yacc, Zacc) * 57.2958;
+	  //YaccAng = atan2(Xacc, Zacc) * 57.2958;
+	  //ZaccAng = atan2(Xacc, Yacc) * 57.2958;
+
+	  //Convert angular velocities to deg/sec
+	  XangVel = ((double)gx / 32768) * 250;
+	  YangVel = ((double)gy / 32768) * 250;
+	  ZangVel = ((double)gz / 32768) * 250;
+
+	  //Get the time since the last MPU read
+	  mainCountCurr = (uint32_t)__HAL_TIM_GET_COUNTER(&htim1); //Using timer 1 for testing
+	  mainCount = mainCountCurr - mainCountPrev;
+	  if (mainCount > 66000){
+		  mainCount = mainCount + 65535; //Make mainCount positive if the timer rolled over
+	  }
+	  mainCountPrev = mainCountCurr;
+	  mainCount = (mainCount * 64) / 8; //Main loop time in us
+
+	  //Find degrees turned since last read
+	  /*XDegree = XangVel * ((float)mainCount / 1000000); //Using a sampling rate of 10 ms
+	  YDegree = YangVel * ((float)mainCount / 1000000); //Main loop seems to take an extra 4 ms
+	  ZDegree = ZangVel * ((float)mainCount / 1000000);*/
+
+	    XDegree = XangVel * 0.013; //Using a sampling rate of 10 ms
+	    YDegree = YangVel * 0.013; //Main loop seems to take an extra 4 ms
+	  	ZDegree = ZangVel * 0.013;
+
+	  //Integrate angular velocities
+	  XgyroAng += XDegree;
+	  YgyroAng += YDegree;
+	  ZgyroAng += ZDegree;
 
 	  //Get the filtered angles
-	  Xang = ((1.0 - alpha) * XgyroAng) + (alpha * XaccAng);
-	  Yang = ((1.0 - alpha) * YgyroAng) + (alpha * YaccAng);
-	  Zang = ((1.0 - alpha) * ZgyroAng) + (alpha * ZaccAng);
+	  Xang = ((1.0 - alpha) * (Xang + XDegree)) + (alpha * XaccAng);
+	  Yang = ((1.0 - alpha) * (Yang + YDegree)) + (alpha * YaccAng);
+	  Zang = ((1.0 - alpha) * (Zang + ZDegree)) + (alpha * ZaccAng);
+
+	  //Get loop time
+	  if (strcmp(dataRX, "TIME\r\n") == 0) {
+		  sprintf(dataTX, "%lu\r\n", mainCount);
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+	  }
 
 	  //Calibrate
 	  if (strcmp(dataRX, "CALB\r\n") == 0) {
-
-		  //Send confirmation to Bluetooth
-		  sprintf(dataTX, "Calibration Starting....\r\n");
-		  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
+	  //Send confirmation to Bluetooth
 		  sprintf(dataRX, "______");
+		  sprintf(dataTX, "Calibration Starting....\r\n");
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 
-		  gxOff = 480; //X-Offset
-		  gyOff = -100; //Y-Offset
-		  gzOff = -100; //Z-Offset
-		  axOff = -700; //X-Offset
-		  ayOff = 650; //Y-Offset
-		  azOff = 1800; //Z-Offset
+		  gxOff = 0; //X-Offset
+		  gyOff = 0; //Y-Offset
+		  gzOff = 0; //Z-Offset
+		  axOff = 0; //X-Offset
+		  ayOff = 0; //Y-Offset
+		  azOff = 0; //Z-Offset
 
+		  //Reset gyro angles
 		  XgyroAng = 0;
 		  YgyroAng = 0;
 		  ZgyroAng = 0;
-
 
 		  //Burn 100 read cycles
 		  for (loop = 0; loop < 100; loop++){
@@ -267,7 +318,7 @@ int main(void)
 			  HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
 		  }
 
-		  //Average the next 1000 reads
+		  //Add the next 1000 reads
 		  for (loop = 0; loop < 1000; loop++){
 		  	  i2cBuff[0]= 0x3B; //Accelerometer addresses
 		  	  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
@@ -281,10 +332,9 @@ int main(void)
 		      gy = (i2cBuff[11]<<8 | i2cBuff[12]);
 		      gz = (i2cBuff[13]<<8 | i2cBuff[14]);
 
-		      //Find running count
 		      axOff += ax;
 		      ayOff += ay;
-		      azOff += (16384 - az);
+		      azOff += (az - 16384);
 		      gxOff += gx;
 		      gyOff += gy;
 		      gzOff += gz;
@@ -299,15 +349,14 @@ int main(void)
 		  gzOff /= 1000;
 
 		  //Send confirmation of calibration to Bluetooth
-		  sprintf(dataTX, "Finished!\nCalibration Offsets are: axOff=%d, ayOff=%d, azOff=%d, gxOff=%d, gyOff=%d, gzOff=%d\r\n",
+		  sprintf(dataTX, "Finished!\nCalibration Offsets are:\naxOff=%d, ayOff=%d, azOff=%d,\ngxOff=%d, gyOff=%d, gzOff=%d\r\n",
 				  axOff, ayOff, azOff, gxOff, gyOff, gzOff);
-		  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 		  sprintf(dataRX, "______");
 	  }
 
-
 	  //Send angle info to Bluetooth for testing purposes
-	  if (strcmp(dataRX, "SEND\r\n") == 0) {
+	  if ((strcmp(dataRX, "SEND\r\n") == 0) && ((sendCount % 16) == 0)) {
 		  //Clear RX buffer
 		  //sprintf(dataRX, "______");
 
@@ -330,13 +379,7 @@ int main(void)
 		  ZGyrInt1 = ZGyrVal;                      // Get the integer
 		  ZGyrFrac = ZGyrVal - ZGyrInt1;            // Get fraction
 		  ZGyrInt2 = trunc(ZGyrFrac * 100);        // Turn into integer
-
-		  //sprintf(dataTX, "%s%d.%02d, %s%d.%02d, %s%d.%02d, \r\n",
-			// 	  XGyrSign, XGyrInt1, XGyrInt2, YGyrSign, YGyrInt1, YGyrInt2, ZGyrSign, ZGyrInt1, ZGyrInt2);
-
 		  //sprintf(dataTX, "Xacc = %d, Yacc = %d, Zacc = %d\r\n", ax, ay, az);
-		  //Send Bluetooth
-		  //HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
 
 		  //This converts the floats to a series of three ints
 		  XAccSign = (XaccAng < 0) ? "-" : " ";
@@ -356,17 +399,10 @@ int main(void)
 		  ZAccInt1 = ZAccVal;                      // Get the integer
 		  ZAccFrac = ZAccVal - ZAccInt1;              // Get fraction
 		  ZAccInt2 = trunc(ZAccFrac * 100);        // Turn into integer
-
-		  sprintf(dataTX, "%s%d.%02d,%s%d.%02d,%s%d.%02d, %s%d.%02d,%s%d.%02d,%s%d.%02d\r\n",
-				  XGyrSign, XGyrInt1, XGyrInt2, YGyrSign, YGyrInt1, YGyrInt2, ZGyrSign, ZGyrInt1, ZGyrInt2,
-				  XAccSign, XAccInt1, XAccInt2, YAccSign, YAccInt1, YAccInt2, ZAccSign, ZAccInt1, ZAccInt2);
-
 		  //sprintf(dataTX, "Xang = %d, Yang = %d, Zang = %d\r\n", gx, gy, gz);
-		  //Send Bluetooth
-		  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);
 
 		  //This converts the floats to a series of three ints
-		  /*XSign = (Xang < 0) ? "-" : " ";
+		  XSign = (Xang < 0) ? "-" : " ";
 		  XVal = (Xang < 0) ? -Xang : Xang;
 		  XInt1 = XVal;                      // Get the integer
 		  XFrac = XVal - XInt1;              // Get fraction
@@ -384,12 +420,15 @@ int main(void)
 		  ZFrac = ZVal - ZInt1;              // Get fraction
 		  ZInt2 = trunc(ZFrac * 100);        // Turn into integer
 
-		  sprintf(dataTX, "Xang = %s%d.%02d, Yang = %s%d.%02d, Zang = %s%d.%02d\r\n",
-		   		  XSign, XInt1, XInt2, YSign, YInt1, YInt2, ZSign, ZInt1, ZInt2);
+		  sprintf(dataTX, "%s%d.%02d,%s%d.%02d, %s%d.%02d,%s%d.%02d, %s%d.%02d,%s%d.%02d\r\n",
+		  		  XGyrSign, XGyrInt1, XGyrInt2, YGyrSign, YGyrInt1, YGyrInt2,
+		  		  XAccSign, XAccInt1, XAccInt2, YAccSign, YAccInt1, YAccInt2,
+				  XSign, XInt1, XInt2, YSign, YInt1, YInt2);
 
 		  //Send Bluetooth
-		  HAL_UART_Transmit(&huart2, dataTX, strlen(dataTX), 1000);*/
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 	  }
+	  sendCount++;
 
 	  //For testing
 	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, 0);
@@ -423,7 +462,7 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
@@ -467,35 +506,223 @@ static void MX_I2C1_Init(void)
 }
 
 /**
-  * @brief USART2 Initialization Function
+  * @brief TIM1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_USART2_UART_Init(void)
+static void MX_TIM1_Init(void)
 {
 
-  /* USER CODE BEGIN USART2_Init 0 */
+  /* USER CODE BEGIN TIM1_Init 0 */
 
-  /* USER CODE END USART2_Init 0 */
+  /* USER CODE END TIM1_Init 0 */
 
-  /* USER CODE BEGIN USART2_Init 1 */
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
-  /* USER CODE END USART2_Init 1 */
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 9600;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 64;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 65535;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART2_Init 2 */
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
 
-  /* USER CODE END USART2_Init 2 */
+  /* USER CODE END TIM1_Init 2 */
+  HAL_TIM_MspPostInit(&htim1);
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 3;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 2500;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+  HAL_TIM_MspPostInit(&htim2);
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 7;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 20000;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 9600;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
 
 }
 
@@ -508,9 +735,9 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
-  /* DMA1_Channel6_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel6_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Channel6_IRQn);
+  /* DMA1_Channel5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn);
 
 }
 
@@ -528,22 +755,116 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, DIR_3_Pin|DIR_2_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PB12 PB13 PB14 */
-  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14;
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, DIR_1_Pin|BOOT_1_Pin|LED_1_Pin|LED_2_Pin 
+                          |LED_3_Pin|LED_4_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : DIR_3_Pin DIR_2_Pin */
+  GPIO_InitStruct.Pin = DIR_3_Pin|DIR_2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : DIR_1_Pin */
+  GPIO_InitStruct.Pin = DIR_1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(DIR_1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : BOOT_1_Pin LED_1_Pin LED_2_Pin LED_3_Pin 
+                           LED_4_Pin */
+  GPIO_InitStruct.Pin = BOOT_1_Pin|LED_1_Pin|LED_2_Pin|LED_3_Pin 
+                          |LED_4_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /*Configure GPIO pins : TACH_1_Pin TACH_2_Pin TACH_3_Pin */
+  GPIO_InitStruct.Pin = TACH_1_Pin|TACH_2_Pin|TACH_3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
 }
 
 /* USER CODE BEGIN 4 */
+
+//UART Callback for testing purposes
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	__NOP();
 }
+
+//Calibrate MPU
+void Calibrate(void)
+{
+	//Send confirmation to Bluetooth
+	  sprintf(dataTX, "Calibration Starting....\r\n");
+	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+	  gxOff = 0; //X-Offset
+	  gyOff = 0; //Y-Offset
+	  gzOff = 0; //Z-Offset
+	  axOff = 0; //X-Offset
+	  ayOff = 0; //Y-Offset
+	  azOff = 0; //Z-Offset
+
+	  //Reset gyro angles
+	  XgyroAng = 0;
+	  YgyroAng = 0;
+	  ZgyroAng = 0;
+
+	  //Burn 100 read cycles
+	  for (loop = 0; loop < 100; loop++){
+		  i2cBuff[0]= 0x3B; //Accelerometer addresses
+		  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
+		  i2cBuff[1] = 0x00;
+		  HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
+	  }
+
+	  //Add the next 1000 reads
+	  for (loop = 0; loop < 1000; loop++){
+	  	  i2cBuff[0]= 0x3B; //Accelerometer addresses
+	  	  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
+	      i2cBuff[1] = 0x00;
+	      HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
+
+	      ax = (i2cBuff[1]<<8  |  i2cBuff[2]);
+	      ay = (i2cBuff[3]<<8  |  i2cBuff[4]);
+	      az = (i2cBuff[5]<<8  |  i2cBuff[6]);
+	      gx = (i2cBuff[9]<<8  | i2cBuff[10]);
+	      gy = (i2cBuff[11]<<8 | i2cBuff[12]);
+	      gz = (i2cBuff[13]<<8 | i2cBuff[14]);
+
+	      axOff += ax;
+	      ayOff += ay;
+	      azOff += (az - 16384);
+	      gxOff += gx;
+	      gyOff += gy;
+	      gzOff += gz;
+	  }
+
+	  //Find the averages
+	  axOff /= 1000;
+	  ayOff /= 1000;
+	  azOff /= 1000;
+	  gxOff /= 1000;
+	  gyOff /= 1000;
+	  gzOff /= 1000;
+
+	  //Send confirmation of calibration to Bluetooth
+	  sprintf(dataTX, "Finished!\nCalibration Offsets are:\naxOff=%d, ayOff=%d, azOff=%d,\ngxOff=%d, gyOff=%d, gzOff=%d\r\n",
+			  axOff, ayOff, azOff, gxOff, gyOff, gzOff);
+	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+	  sprintf(dataRX, "______");
+}
+
+
 /* USER CODE END 4 */
 
 /**
