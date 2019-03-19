@@ -91,6 +91,17 @@ void Calibrate(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+//Stuff for cube flip
+int pwm_esc1 = 0;
+int pwm_esc2 = 0;
+int pwm_esc3 = 0;
+
+int pwm_servo1 = 0;
+int pwm_servo2 = 0;
+int pwm_servo3 = 0;
+int dummy = 0;
+
+//Stuff for loop time
 uint8_t sendCount;
 uint32_t mainCountPrev, mainCountCurr, mainCount;
 
@@ -173,8 +184,11 @@ int main(void)
 
   //Begin PWM
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+  HAL_Delay(3000);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 350);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700); // 680 implies the brake is not active
 
   //Wake up MPU
   i2cBuff[0] = 0x6B;
@@ -209,8 +223,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  //__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 1500);
-	  //__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 1000000);
 
 	  //For testing
 	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, 1);
@@ -284,6 +296,73 @@ int main(void)
 	  Xang = ((1.0 - alpha) * (Xang + XDegree)) + (alpha * XaccAng);
 	  Yang = ((1.0 - alpha) * (Yang + YDegree)) + (alpha * YaccAng);
 	  Zang = ((1.0 - alpha) * (Zang + ZDegree)) + (alpha * ZaccAng);
+
+	  //Test motor
+	  if (strcmp(dataRX, "TEST\r\n") == 0) {
+		  sprintf(dataRX, "______");
+	  	  sprintf(dataTX, "Testing Motors...\r\n");
+	  	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+		  //Motor Test Code
+		  HAL_Delay(3000);
+		  for(pwm_esc1 = 350; pwm_esc1 <= 2100; pwm_esc1++ ){
+			  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1);
+			  HAL_Delay(30);
+		  }
+
+		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 350);
+		  sprintf(dataTX, "Test Finished!\r\n");
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+	  }
+
+	  //Test servo
+      if (strcmp(dataRX, "SERV\r\n") == 0) {
+	  	  sprintf(dataRX, "______");
+	   	  sprintf(dataTX, "Testing Servo...\r\n");
+	   	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+	  	  //Motor Test Code
+	  	  HAL_Delay(3000);
+	  	  for(pwm_servo1 = 700; pwm_servo1 >= 580; pwm_servo1-- ){
+	  		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, pwm_servo1);
+	  		  HAL_Delay(100);
+	  	  }
+
+  		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 680);
+  		  sprintf(dataTX, "Test Finished!\r\n");
+  		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+  	  }
+
+	  //Test cube flip
+      if (strcmp(dataRX, "FLIP\r\n") == 0) {
+	  	  sprintf(dataRX, "______");
+	   	  sprintf(dataTX, "Flipping Cube...\r\n");
+	   	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+	  	  //Cube Flip Test Code
+		  HAL_Delay(5000);                                    //Small delay before flipping program begins
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700);  //Deactivate brake
+		  HAL_Delay(500);                                     //Small delay for timing purposes
+	   	  sprintf(dataTX, "Ramping up motor...\r\n");
+	   	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+		  for (pwm_esc1 = 350; pwm_esc1 <= 1800; pwm_esc1++ ){
+			  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1); //Slowly ramp wheel to max speed
+			  HAL_Delay(25);
+		  }
+		  //__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 1500); //Set wheel to max speed
+	   	  sprintf(dataTX, "About to flip...\r\n");
+	   	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+		  HAL_Delay(12000);                                   //Gives 12 seconds for wheel to spin up
+		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);    //Cuts power to wheel
+		  HAL_Delay(20);                                      //Small delay so events don't overlap
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 560);  //Activate brake
+		  HAL_Delay(1000);                                    //Waits 1 second for timing purposes
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700);  //Deactivate brake
+		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);  //Reset motor to normal running speed
+
+  		  sprintf(dataTX, "Test Finished!\r\n");
+  		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+  	  }
 
 	  //Get loop time
 	  if (strcmp(dataRX, "TIME\r\n") == 0) {
