@@ -44,9 +44,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdlib.h>
+#include <math.h>
+#include <string.h>
 #include "quaternionFilters.h"
-
-
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -67,9 +67,9 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
-TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_usart1_rx;
@@ -86,7 +86,7 @@ static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
-static void MX_TIM1_Init(void);
+static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -112,21 +112,29 @@ uint32_t mainCountPrev, mainCountCurr, mainCount;
 uint8_t dataRX[6];
 uint8_t dataTX[100];
 
-//Stuff for MPU
+//Stuff for MPU and AK
 uint8_t i2cBuff[15];
 uint16_t mpu6050Address = 0xD0;
 uint16_t ak8963Address = 0x18;
-int16_t gx, gy, gz, ax, ay, az, mx, my, mz;
+uint16_t loop;
+int16_t gX, gY, gZ, aX, aY, aZ, mX, mY, mZ;
 int32_t gxOff, gyOff, gzOff;
 int32_t axOff, ayOff, azOff;
 int32_t mxOff, myOff, mzOff;
 float mxScale, myScale, mzScale;
-uint16_t loop;
-double Xang, Yang, Zang;
-double XangVel, YangVel, ZangVel, Xacc, Yacc, Zacc;
-double XDegree, YDegree, ZDegree;
-double XgyroAng, YgyroAng, ZgyroAng, XaccAng, YaccAng, ZaccAng;
+int16_t mx_max, my_max, mz_max;
+int16_t mx_min, my_min, mz_min;
+int16_t mx_temp, my_temp, mz_temp;
+float mxSens, mySens, mzSens;
+float avg_rad;
+float Xang, Yang, Zang;
+float XangVel, YangVel, ZangVel;
+float Xacc, Yacc, Zacc;
+float Xmag, Ymag, Zmag;
+float XDegree, YDegree, ZDegree;
+float XgyroAng, YgyroAng, ZgyroAng, XaccAng, YaccAng, ZaccAng;
 float alpha = 0.02;
+float yaw, pitch, roll;
 uint8_t outstrX[10];
 uint8_t outstrY[10];
 uint8_t outstrZ[10];
@@ -149,6 +157,41 @@ float XAccVal, YAccVal, ZAccVal;
 int XAccInt1, YAccInt1, ZAccInt1;
 float XAccFrac, YAccFrac, ZAccFrac;
 int XAccInt2, YAccInt2, ZAccInt2;
+
+// Stuff for Mahony Quaternion Filter
+// These are the free parameters in the Mahony filter and fusion scheme, Kp
+// for proportional feedback, Ki for integral
+float Kp = 2.0f * 5.0f;
+float Ki = 0.0f;
+
+float GyroMeasError = 3.141592 * (40.0f / 180.0f);
+// gyroscope measurement drift in rad/s/s (start at 0.0 deg/s/s)
+float GyroMeasDrift = 3.141592 * (0.0f  / 180.0f);
+// There is a tradeoff in the beta parameter between accuracy and response
+// speed. In the original Madgwick study, beta of 0.041 (corresponding to
+// GyroMeasError of 2.7 degrees/s) was found to give optimal accuracy.
+// However, with this value, the LSM9SD0 response time is about 10 seconds
+// to a stable initial quaternion. Subsequent changes also require a
+// longish lag time to a stable output, not fast enough for a quadcopter or
+// robot car! By increasing beta (GyroMeasError) by about a factor of
+// fifteen, the response time constant is reduced to ~2 sec. I haven't
+// noticed any reduction in solution accuracy. This is essentially the I
+// coefficient in a PID control sense; the bigger the feedback coefficient,
+// the faster the solution converges, usually at the expense of accuracy.
+// In any case, this is the free parameter in the Madgwick filtering and
+// fusion scheme.
+
+// Beta and zeta are not needed for the Mahony Filter
+//float beta = sqrt(3.0f / 4.0f) * GyroMeasError;   // Compute beta
+// Compute zeta, the other free parameter in the Madgwick scheme usually
+// set to a small or zero value
+//float zeta = sqrt(3.0f / 4.0f) * GyroMeasDrift;
+
+// Vector to hold integral error for Mahony method
+float eInt[3] = {0.0f, 0.0f, 0.0f};
+// Vector to hold quaternion
+float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+
 
 /* USER CODE END 0 */
 
@@ -185,21 +228,16 @@ int main(void)
   MX_USART1_UART_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
-  MX_TIM1_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
 
   //Begin PWM
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
-  HAL_Delay(3000);
-  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 350);
-  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700); // 680 implies the brake is not active
-
-  //Enable i2c bypass on mpu9250
-  i2cBuff[0] = 0x37;
-  i2cBuff[1] = 0x02;
-  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4); // Start interrupt for gyroscope measurements
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3); // Start wheel motor PWM
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3); // Start brake servo PWM
+  HAL_Delay(1000);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);    // 0 is implied that the wheel is not active
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700);  // 700 implies the brake is not active
 
   //Wake up MPU
   i2cBuff[0] = 0x6B;
@@ -216,25 +254,79 @@ int main(void)
   i2cBuff[1] = 0x00;
   HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
 
-  //Set Mag range to 16 bits and mode to continuous 100Hz measurement
+  //Enable i2c bypass on mpu9250
+  i2cBuff[0] = 0x37;
+  i2cBuff[1] = 0x02;
+  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
+
+  //Find the factory-measured magnetometer sensitivity values
+  //Enter Fuse ROM Access Mode
+  i2cBuff[0] = 0x0A;
+  i2cBuff[1] = 0x0F;
+  HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 2, 100);
+  //Get sensitivity values
+  i2cBuff[0] = 0x10;
+  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
+  i2cBuff[1] = 0x00;
+  HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 3, 20);
+
+  //Calculate sensitivities from the raw values
+  mxSens = ((float)(i2cBuff[1] - 128) / 256.0) + 1.0;
+  mySens = ((float)(i2cBuff[2] - 128) / 256.0) + 1.0;
+  mzSens = ((float)(i2cBuff[3] - 128) / 256.0) + 1.0;
+
+  //For testing
+  /*XSign = (mxSens < 0) ? "-" : " ";
+  XVal = (mxSens < 0) ? -mxSens : mxSens;
+  XInt1 = XVal;                      // Get the integer
+  XFrac = XVal - XInt1;              // Get fraction
+  XInt2 = trunc(XFrac * 100);        // Turn into integer
+
+  YSign = (mySens < 0) ? "-" : " ";
+  YVal = (mySens < 0) ? -mySens : mySens;
+  YInt1 = YVal;                      // Get the integer
+  YFrac = YVal - YInt1;              // Get fraction
+  YInt2 = trunc(YFrac * 100);        // Turn into integer
+
+  ZSign = (mzSens < 0) ? "-" : " ";
+  ZVal = (mzSens < 0) ? -mzSens : mzSens;
+  ZInt1 = ZVal;                      // Get the integer
+  ZFrac = ZVal - ZInt1;              // Get fraction
+  ZInt2 = trunc(ZFrac * 100);        // Turn into integer
+
+  sprintf(dataTX, "mxSens=%s%d.%02d, mySens=%s%d.%02d, mzSens=%s%d.%02d\r\n",
+		  XSign, XInt1, XInt2, YSign, YInt1, YInt2, ZSign, ZInt1, ZInt2);
+  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);*/
+
+
+
+
+  //Set Mag range to 16 bits and measurement mode to continuous 100Hz
   i2cBuff[0] = 0x0A;
   i2cBuff[1] = 0x16;
   HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 2, 100);
 
   //Get data from Bluetooth
-  sprintf(dataTX, "Press any Button to Start.\r\n");
+  sprintf(dataTX, "\nPress any Button to Start.\r\n");
   HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
   sprintf(dataRX, "______");
   HAL_UART_Receive_DMA(&huart1, dataRX, 6);
 
   //Set initial offsets
-  gxOff = -480; //X-Offset
-  gyOff = 100; //Y-Offset
-  gzOff = 100; //Z-Offset
-  axOff = 700; //X-Offset
-  ayOff = -650; //Y-Offset
-  azOff = -1800; //Z-Offset
+  gxOff = -480;
+  gyOff = 100;
+  gzOff = 100;
+  axOff = 700;
+  ayOff = -650;
+  azOff = -1800;
+  mxOff = 0;
+  myOff = 0;
+  mzOff = 0;
+  mxScale = 1.06;
+  myScale = 0.90;
+  mzScale = 1.06;
 
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 1500); // 1500 creates an interrupt every 12 ms
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -245,99 +337,8 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-	  //See if mag data is ready
-	  i2cBuff[0]= 0x02; //Data is ready register
-	  HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 1, 20);
-	  i2cBuff[1] = 0x00;
-	  HAL_I2C_Master_Receive(&hi2c1, ak8963Address, &i2cBuff[1], 1, 20);
-	  if (i2cBuff[1] & 0x01){
-		  //Get mag data
-		  i2cBuff[0]= 0x03; //Magnetometer address
-		  HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 1, 20);
-		  i2cBuff[1] = 0x00;
-		  HAL_I2C_Master_Receive(&hi2c1, ak8963Address, &i2cBuff[1], 7, 20);
-		  //See if magnetometer has overflowed
-		  if (!(i2cBuff[7] & 0x08)){
-			  mx = (i2cBuff[2]<<8  |  i2cBuff[1]);
-			  my = (i2cBuff[4]<<8  |  i2cBuff[3]);
-			  mz = (i2cBuff[6]<<8  |  i2cBuff[5]);
-			  //sprintf(dataTX, "Xmag = %d, Ymag = %d, Zmag = %d\r\n", mx, my, mz);
-			  //HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
-		  }
-	  }
-
 	  //For testing
 	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, 1);
-
-	  //Get gyroscope info
-	  i2cBuff[0]= 0x3B; //Accelerometer addresses
-	  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
-
-	  i2cBuff[1] = 0x00;
-	  HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
-
-	  ax = (i2cBuff[1]<<8 | i2cBuff[2]);
-	  ay = (i2cBuff[3]<<8 | i2cBuff[4]);
-	  az = (i2cBuff[5]<<8 | i2cBuff[6]);
-	  gx = (i2cBuff[9]<<8  | i2cBuff[10]);
-	  gy = (i2cBuff[11]<<8 | i2cBuff[12]);
-	  gz = (i2cBuff[13]<<8 | i2cBuff[14]);
-
-	  //Subtract offsets
-	  gx -=  gxOff; //X-Offset
-	  gy -=  gyOff; //Y-Offset
-	  gz -=  gzOff; //Z-Offset
-	  ax -=  axOff; //X-Offset
-	  ay -=  ayOff; //Y-Offset
-	  az -=  azOff; //Z-Offset
-
-	  //Convert accelerations to g's
-	  Xacc = ((double)ax / 32768) * 2;
-	  Yacc = ((double)ay / 32768) * 2;
-	  Zacc = ((double)az / 32768) * 2;
-
-	  //Find angle from direction of gravitational acceleration
-	  XaccAng = atan2(Yacc, sqrt((Xacc * Xacc) + (Zacc * Zacc))) * 57.2958;
-	  YaccAng = -atan2(Xacc, sqrt((Yacc * Yacc) + (Zacc * Zacc))) * 57.2958;
-	  ZaccAng = atan2(Zacc, sqrt((Xacc * Xacc) + (Yacc * Yacc))) * 57.2958;
-
-	  //Find angle from direction of gravitational acceleration using other formula
-	  //XaccAng = atan2(Yacc, Zacc) * 57.2958;
-	  //YaccAng = atan2(Xacc, Zacc) * 57.2958;
-	  //ZaccAng = atan2(Xacc, Yacc) * 57.2958;
-
-	  //Convert angular velocities to deg/sec
-	  XangVel = ((double)gx / 32768) * 250;
-	  YangVel = ((double)gy / 32768) * 250;
-	  ZangVel = ((double)gz / 32768) * 250;
-
-	  //Get the time since the last MPU read
-	  mainCountCurr = (uint32_t)__HAL_TIM_GET_COUNTER(&htim1); //Using timer 1 for testing
-	  mainCount = mainCountCurr - mainCountPrev;
-	  if (mainCount > 66000){
-		  mainCount = mainCount + 65535; //Make mainCount positive if the timer rolled over
-	  }
-	  mainCountPrev = mainCountCurr;
-	  mainCount = (mainCount * 64) / 8; //Main loop time in us
-
-	  //Find degrees turned since last read
-	  /*XDegree = XangVel * ((float)mainCount / 1000000); //Using a sampling rate of 10 ms
-	  YDegree = YangVel * ((float)mainCount / 1000000); //Main loop seems to take an extra 4 ms
-	  ZDegree = ZangVel * ((float)mainCount / 1000000);*/
-
-	    XDegree = XangVel * 0.013; //Using a sampling rate of 10 ms
-	    YDegree = YangVel * 0.013; //Main loop seems to take an extra 4 ms
-	  	ZDegree = ZangVel * 0.013;
-
-	  //Integrate angular velocities
-	  XgyroAng += XDegree;
-	  YgyroAng += YDegree;
-	  ZgyroAng += ZDegree;
-
-	  //Get the filtered angles
-	  Xang = ((1.0 - alpha) * (Xang + XDegree)) + (alpha * XaccAng);
-	  Yang = ((1.0 - alpha) * (Yang + YDegree)) + (alpha * YaccAng);
-	  Zang = ((1.0 - alpha) * (Zang + ZDegree)) + (alpha * ZaccAng);
 
 	  //Test motor
 	  if (strcmp(dataRX, "TEST\r\n") == 0) {
@@ -347,12 +348,12 @@ int main(void)
 
 		  //Motor Test Code
 		  HAL_Delay(3000);
-		  for(pwm_esc1 = 350; pwm_esc1 <= 2100; pwm_esc1++ ){
+		  for(pwm_esc1 = 350; pwm_esc1 <= 2499; pwm_esc1++ ){
 			  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1);
-			  HAL_Delay(30);
+			  HAL_Delay(15);
 		  }
 
-		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 350);
+		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
 		  sprintf(dataTX, "Test Finished!\r\n");
 		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 	  }
@@ -365,7 +366,7 @@ int main(void)
 
 	  	  //Motor Test Code
 	  	  HAL_Delay(3000);
-	  	  for(pwm_servo1 = 700; pwm_servo1 >= 580; pwm_servo1-- ){
+	  	  for(pwm_servo1 = 700; pwm_servo1 >= 550; pwm_servo1-- ){
 	  		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, pwm_servo1);
 	  		  HAL_Delay(100);
 	  	  }
@@ -387,9 +388,9 @@ int main(void)
 		  HAL_Delay(500);                                     //Small delay for timing purposes
 	   	  sprintf(dataTX, "Ramping up motor...\r\n");
 	   	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
-		  for (pwm_esc1 = 350; pwm_esc1 <= 1800; pwm_esc1++ ){
+		  for (pwm_esc1 = 100; pwm_esc1 <= 2499; pwm_esc1++ ){
 			  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1); //Slowly ramp wheel to max speed
-			  HAL_Delay(25);
+			  HAL_Delay(10);
 		  }
 		  //__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 1500); //Set wheel to max speed
 	   	  sprintf(dataTX, "About to flip...\r\n");
@@ -397,10 +398,10 @@ int main(void)
 		  HAL_Delay(12000);                                   //Gives 12 seconds for wheel to spin up
 		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);    //Cuts power to wheel
 		  HAL_Delay(20);                                      //Small delay so events don't overlap
-		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 560);  //Activate brake
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 550);  //Activate brake
 		  HAL_Delay(1000);                                    //Waits 1 second for timing purposes
 		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700);  //Deactivate brake
-		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);  //Reset motor to normal running speed
+		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);    //Reset motor to normal running speed
 
   		  sprintf(dataTX, "Test Finished!\r\n");
   		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
@@ -414,9 +415,12 @@ int main(void)
 
 	  //Calibrate
 	  if (strcmp(dataRX, "CALB\r\n") == 0) {
-		  //Send confirmation to Bluetooth
+	  //Send confirmation to Bluetooth
 		  sprintf(dataRX, "______");
 		  sprintf(dataTX, "Calibration Starting....\r\n");
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+		  sprintf(dataTX, "Keep the device steady.\r\n");
 		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 
 		  gxOff = 0; //X-Offset
@@ -446,19 +450,19 @@ int main(void)
 		      i2cBuff[1] = 0x00;
 		      HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
 
-		      ax = (i2cBuff[1]<<8  |  i2cBuff[2]);
-		      ay = (i2cBuff[3]<<8  |  i2cBuff[4]);
-		      az = (i2cBuff[5]<<8  |  i2cBuff[6]);
-		      gx = (i2cBuff[9]<<8  | i2cBuff[10]);
-		      gy = (i2cBuff[11]<<8 | i2cBuff[12]);
-		      gz = (i2cBuff[13]<<8 | i2cBuff[14]);
+		      aX = (i2cBuff[1]<<8  |  i2cBuff[2]);
+		      aY = (i2cBuff[3]<<8  |  i2cBuff[4]);
+		      aZ = (i2cBuff[5]<<8  |  i2cBuff[6]);
+		      gX = (i2cBuff[9]<<8  | i2cBuff[10]);
+		      gY = (i2cBuff[11]<<8 | i2cBuff[12]);
+		      gZ = (i2cBuff[13]<<8 | i2cBuff[14]);
 
-		      axOff += ax;
-		      ayOff += ay;
-		      azOff += (az - 16384);
-		      gxOff += gx;
-		      gyOff += gy;
-		      gzOff += gz;
+		      axOff += aX;
+		      ayOff += aY;
+		      azOff += aZ;
+		      gxOff += gX;
+		      gyOff += gY;
+		      gzOff += gZ;
 		  }
 
 		  //Find the averages
@@ -469,89 +473,82 @@ int main(void)
 		  gyOff /= 1000;
 		  gzOff /= 1000;
 
-
-
-/*
+		  //Calibrate the magnetometer
 		  sprintf(dataTX, "Wave the device in a figure-eight pattern.\r\n");
 		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 
-		  //Calibrate magnetometer
-		  uint16_t ii = 0;
-		  int32_t mag_bias[3]  = {0, 0, 0},
-		          mag_scale[3] = {0, 0, 0};
-		  int16_t mag_max[3]   = {-32768, -32768, -32768},
-		          mag_min[3]   = {32767, 32767, 32767},
-		          mag_temp[3]  = {0, 0, 0};
+		  //Reset the offsets and temp variables
+		  mxOff = 0;
+		  myOff = 0;
+		  mzOff = 0;
+		  mxScale = 0;
+		  myScale = 0;
+		  mzScale = 0;
+		  mx_max = -10000;
+		  my_max = -10000;
+		  mz_max = -10000;
+		  mx_min = 10000;
+		  my_min = 10000;
+		  mz_min = 10000;
 
-		  for (ii = 0; ii < 1500; ii++){
+		  //Get max and min measurements from 1500 reads
+		  for (loop = 0; loop < 1500; loop++){
+		  	i2cBuff[0]= 0x03;
+		  	HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 1, 20);
+		  	i2cBuff[1] = 0x00;
+		  	HAL_I2C_Master_Receive(&hi2c1, ak8963Address, &i2cBuff[1], 7, 20);
+		  		if (!(i2cBuff[7] & 0x08)){
+		  			mx_temp = (i2cBuff[2]<<8  |  i2cBuff[1]);
+		  			my_temp = (i2cBuff[4]<<8  |  i2cBuff[3]);
+		  			mz_temp = (i2cBuff[6]<<8  |  i2cBuff[5]);
 
+		  			if (mx_temp > mx_max){mx_max = mx_temp;}
+		  			if (mx_temp < mx_min){mx_min = mx_temp;}
 
+		  			if (my_temp > my_max){my_max = my_temp;}
+		  			if (my_temp < my_min){my_min = my_temp;}
 
-			i2cBuff[0]= 0x03;
-			HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 1, 20);
-			i2cBuff[1] = 0x00;
-			HAL_I2C_Master_Receive(&hi2c1, ak8963Address, &i2cBuff[1], 6, 20);
-			mag_temp[0] = (i2cBuff[2]<<8  |  i2cBuff[1]);
-			mag_temp[1] = (i2cBuff[4]<<8  |  i2cBuff[3]);
-			mag_temp[2] = (i2cBuff[6]<<8  |  i2cBuff[5]);
+		  			if (mz_temp > mz_max){mz_max = mz_temp;}
+		  			if (mz_temp < mz_min){mz_min = mz_temp;}
 
-
-
-		    for (int jj = 0; jj < 3; jj++){
-		      if (mag_temp[jj] > mag_max[jj]){
-		        mag_max[jj] = mag_temp[jj];
-		      }
-		      if (mag_temp[jj] < mag_min[jj]){
-		        mag_min[jj] = mag_temp[jj];
-		      }
-		    }
-
-		    HAL_Delay(12);
+		  			HAL_Delay(12); //New data should be ready after about 10ms
+		  		}
 		  }
 
 		  // Get hard iron correction
-		  // Get 'average' x mag bias in counts
-		  mag_bias[0] = (mag_max[0] + mag_min[0]) / 2;
-		  // Get 'average' y mag bias in counts
-		  mag_bias[1] = (mag_max[1] + mag_min[1]) / 2;
-		  // Get 'average' z mag bias in counts
-		  mag_bias[2] = (mag_max[2] + mag_min[2]) / 2;
+		  mxOff = (mx_max + mx_min) / 2;
+		  myOff = (my_max + my_min) / 2;
+		  mzOff = (mz_max + mz_min) / 2;
 
+		  // Get soft iron correction
+		  mxScale = (mx_max - mx_min) / 2.0;
+		  myScale = (my_max - my_min) / 2.0;
+		  mzScale = (mz_max - mz_min) / 2.0;
 
-		  mxOff = mag_bias[0];
-		  myOff = mag_bias[1];
-		  mzOff = mag_bias[2];
+		  avg_rad = (mxScale + myScale + mzScale) / 3.0;
+		  mxScale = avg_rad / mxScale;
+		  myScale = avg_rad / myScale;
+		  mzScale = avg_rad / mzScale;
 
-
-		  // Get soft iron correction estimate
-		  // Get average x axis max chord length in counts
-		  mag_scale[0] = (mag_max[0] - mag_min[0]) / 2;
-		  // Get average y axis max chord length in counts
-		  mag_scale[1] = (mag_max[1] - mag_min[1]) / 2;
-		  // Get average z axis max chord length in counts
-		  mag_scale[2] = (mag_max[2] - mag_min[2]) / 2;
-
-		  float avg_rad = mag_scale[0] + mag_scale[1] + mag_scale[2];
-		  avg_rad /= 3.0;
-
-		  mxScale = avg_rad / ((float)mag_scale[0]);
-		  myScale = avg_rad / ((float)mag_scale[1]);
-		  mzScale = avg_rad / ((float)mag_scale[2]);
-
-
-
-
-
-
-
+		  uint16_t mxScale_temp = mxScale * 100;
+		  uint16_t myScale_temp = myScale * 100;
+		  uint16_t mzScale_temp = mzScale * 100;
 
 		  //Send confirmation of calibration to Bluetooth
-		  sprintf(dataTX, "Finished!\nCalibration Offsets are:\naxOff=%d, ayOff=%d, azOff=%d,\ngxOff=%d, gyOff=%d, gzOff=%d,"
-				  "\nmxOff=%d, myOff=%d, mzOff=%d,\nmxScale=%d, myScale=%d, mzScale=%d\r\n",
-				  axOff, ayOff, azOff, gxOff, gyOff, gzOff,
-				  mxOff, myOff, mzOff, mxScale, myScale, mzScale);
+		  sprintf(dataTX, "Finished!\nCalibration Offsets are:\naxOff=%d, ayOff=%d, azOff=%d,\ngxOff=%d, gyOff=%d, gzOff=%d\r\n",
+				  axOff, ayOff, azOff, gxOff, gyOff, gzOff);
 		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
-		  */
+
+		  sprintf(dataTX, "mx_max=%d, my_max=%d, mz_max=%d,\nmx_min=%d, my_min=%d, mz_min=%d\r\n",
+				  mx_max, my_max, mz_max, mx_min, my_min, mz_min);
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+		  sprintf(dataTX, "mxOff=%d, myOff=%d, mzOff=%d,\nmxScale=%d%%, myScale=%d%%, mzScale=%d%%\r\n",
+				  mxOff, myOff, mzOff, mxScale_temp, myScale_temp, mzScale_temp);
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+
+		  sprintf(dataRX, "______");
 	  }
 
 	  //Send angle info to Bluetooth for testing purposes
@@ -561,7 +558,7 @@ int main(void)
 
 		  //This converts the floats to a series of three ints,
 		  //As there is no support for printing floats in the STM32
-		  XGyrSign = (XgyroAng < 0) ? "-" : " ";
+		  /*XGyrSign = (XgyroAng < 0) ? "-" : " ";
 		  XGyrVal = (XgyroAng < 0) ? -XgyroAng : XgyroAng;
 		  XGyrInt1 = XGyrVal;                      // Get the integer
 		  XGyrFrac = XGyrVal - XGyrInt1;            // Get fraction
@@ -622,7 +619,56 @@ int main(void)
 		  sprintf(dataTX, "%s%d.%02d,%s%d.%02d, %s%d.%02d,%s%d.%02d, %s%d.%02d,%s%d.%02d\r\n",
 		  		  XGyrSign, XGyrInt1, XGyrInt2, YGyrSign, YGyrInt1, YGyrInt2,
 		  		  XAccSign, XAccInt1, XAccInt2, YAccSign, YAccInt1, YAccInt2,
-				  XSign, XInt1, XInt2, YSign, YInt1, YInt2);
+				  XSign, XInt1, XInt2, YSign, YInt1, YInt2);*/
+		  /*
+		  //For testing
+		  XSign = (Xmag < 0) ? "-" : " ";
+		  XVal = (Xmag < 0) ? -Xmag : Xmag;
+		  XInt1 = XVal;                      // Get the integer
+		  XFrac = XVal - XInt1;              // Get fraction
+		  XInt2 = trunc(XFrac * 100);        // Turn into integer
+
+		  YSign = (Ymag < 0) ? "-" : " ";
+		  YVal = (Ymag < 0) ? -Ymag : Ymag;
+		  YInt1 = YVal;                      // Get the integer
+		  YFrac = YVal - YInt1;              // Get fraction
+		  YInt2 = trunc(YFrac * 100);        // Turn into integer
+
+		  ZSign = (Zmag < 0) ? "-" : " ";
+		  ZVal = (Zmag < 0) ? -Zmag : Zmag;
+		  ZInt1 = ZVal;                      // Get the integer
+		  ZFrac = ZVal - ZInt1;              // Get fraction
+		  ZInt2 = trunc(ZFrac * 100);        // Turn into integer
+
+		  sprintf(dataTX, "mx=%s%d.%02d, my=%s%d.%02d, mz=%s%d.%02d\r\n",
+				  XSign, XInt1, XInt2, YSign, YInt1, YInt2, ZSign, ZInt1, ZInt2);
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+		  */
+
+		  //For testing
+		  XSign = (yaw < 0) ? "-" : " ";
+		  XVal = (yaw < 0) ? -yaw : yaw;
+		  XInt1 = XVal;                      // Get the integer
+		  XFrac = XVal - XInt1;              // Get fraction
+		  XInt2 = trunc(XFrac * 100);        // Turn into integer
+
+		  YSign = (pitch < 0) ? "-" : " ";
+		  YVal = (pitch < 0) ? -pitch : pitch;
+		  YInt1 = YVal;                      // Get the integer
+		  YFrac = YVal - YInt1;              // Get fraction
+		  YInt2 = trunc(YFrac * 100);        // Turn into integer
+
+		  ZSign = (roll < 0) ? "-" : " ";
+		  ZVal = (roll < 0) ? -roll : roll;
+		  ZInt1 = ZVal;                      // Get the integer
+		  ZFrac = ZVal - ZInt1;              // Get fraction
+		  ZInt2 = trunc(ZFrac * 100);        // Turn into integer
+
+		  sprintf(dataTX, "yaw=%s%d.%02d, pitch=%s%d.%02d, roll=%s%d.%02d\r\n",
+				  XSign, XInt1, XInt2, YSign, YInt1, YInt2, ZSign, ZInt1, ZInt2);
+
+		  //For testing
+		  //sprintf(dataTX, "q0 = %d, q1 = %d, q2 = %d, q3 = %d\r\n", (int16_t)(q[0] * 1000), (int16_t)(q[1] * 1000), (int16_t)(q[2] * 1000), (int16_t)(q[3] * 1000));
 
 		  //Send Bluetooth
 		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
@@ -701,70 +747,6 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
-
-}
-
-/**
-  * @brief TIM1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM1_Init(void)
-{
-
-  /* USER CODE BEGIN TIM1_Init 0 */
-
-  /* USER CODE END TIM1_Init 0 */
-
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
-  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
-
-  /* USER CODE BEGIN TIM1_Init 1 */
-
-  /* USER CODE END TIM1_Init 1 */
-  htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 64;
-  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 65535;
-  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim1.Init.RepetitionCounter = 0;
-  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
-  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
-  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 0;
-  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
-  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
-  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
-  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM1_Init 2 */
-
-  /* USER CODE END TIM1_Init 2 */
-  HAL_TIM_MspPostInit(&htim1);
 
 }
 
@@ -893,6 +875,54 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 64;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 1500;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -998,6 +1028,231 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	__NOP();
 }
+
+
+// Similar to Madgwick scheme but uses proportional and integral filtering on
+// the error between estimated reference vectors and measured ones.
+void MahonyQuaternionUpdate(float ax, float ay, float az, float gx, float gy, float gz, float mx, float my, float mz, float deltat)
+{
+  // short name local variable for readability
+  float q1 = q[0], q2 = q[1], q3 = q[2], q4 = q[3];
+  float norm;
+  float hx, hy, bx, bz;
+  float vx, vy, vz, wx, wy, wz;
+  float ex, ey, ez;
+  float pa, pb, pc;
+
+  // Auxiliary variables to avoid repeated arithmetic
+  float q1q1 = q1 * q1;
+  float q1q2 = q1 * q2;
+  float q1q3 = q1 * q3;
+  float q1q4 = q1 * q4;
+  float q2q2 = q2 * q2;
+  float q2q3 = q2 * q3;
+  float q2q4 = q2 * q4;
+  float q3q3 = q3 * q3;
+  float q3q4 = q3 * q4;
+  float q4q4 = q4 * q4;
+
+  // Normalise accelerometer measurement
+  norm = sqrt(ax * ax + ay * ay + az * az);
+  if (norm == 0.0f) return; // Handle NaN
+  norm = 1.0f / norm;       // Use reciprocal for division
+  ax *= norm;
+  ay *= norm;
+  az *= norm;
+
+  // Normalise magnetometer measurement
+  norm = sqrt(mx * mx + my * my + mz * mz);
+  if (norm == 0.0f) return; // Handle NaN
+  norm = 1.0f / norm;       // Use reciprocal for division
+  mx *= norm;
+  my *= norm;
+  mz *= norm;
+
+  // Reference direction of Earth's magnetic field
+  hx = 2.0f * mx * (0.5f - q3q3 - q4q4) + 2.0f * my * (q2q3 - q1q4) + 2.0f * mz * (q2q4 + q1q3);
+  hy = 2.0f * mx * (q2q3 + q1q4) + 2.0f * my * (0.5f - q2q2 - q4q4) + 2.0f * mz * (q3q4 - q1q2);
+  bx = sqrt((hx * hx) + (hy * hy));
+  bz = 2.0f * mx * (q2q4 - q1q3) + 2.0f * my * (q3q4 + q1q2) + 2.0f * mz * (0.5f - q2q2 - q3q3);
+
+  // Estimated direction of gravity and magnetic field
+  vx = 2.0f * (q2q4 - q1q3);
+  vy = 2.0f * (q1q2 + q3q4);
+  vz = q1q1 - q2q2 - q3q3 + q4q4;
+  wx = 2.0f * bx * (0.5f - q3q3 - q4q4) + 2.0f * bz * (q2q4 - q1q3);
+  wy = 2.0f * bx * (q2q3 - q1q4) + 2.0f * bz * (q1q2 + q3q4);
+  wz = 2.0f * bx * (q1q3 + q2q4) + 2.0f * bz * (0.5f - q2q2 - q3q3);
+
+  // Error is cross product between estimated direction and measured direction of gravity
+  ex = (ay * vz - az * vy) + (my * wz - mz * wy);
+  ey = (az * vx - ax * vz) + (mz * wx - mx * wz);
+  ez = (ax * vy - ay * vx) + (mx * wy - my * wx);
+  if (Ki > 0.0f)
+  {
+    eInt[0] += ex;      // accumulate integral error
+    eInt[1] += ey;
+    eInt[2] += ez;
+  }
+  else
+  {
+    eInt[0] = 0.0f;     // prevent integral wind up
+    eInt[1] = 0.0f;
+    eInt[2] = 0.0f;
+  }
+
+  // Apply feedback terms
+  gx = gx + Kp * ex + Ki * eInt[0];
+  gy = gy + Kp * ey + Ki * eInt[1];
+  gz = gz + Kp * ez + Ki * eInt[2];
+
+  // Integrate rate of change of quaternion
+  pa = q2;
+  pb = q3;
+  pc = q4;
+  q1 = q1 + (-q2 * gx - q3 * gy - q4 * gz) * (0.5f * deltat);
+  q2 = pa + (q1 * gx + pb * gz - pc * gy) * (0.5f * deltat);
+  q3 = pb + (q1 * gy - pa * gz + pc * gx) * (0.5f * deltat);
+  q4 = pc + (q1 * gz + pa * gy - pb * gx) * (0.5f * deltat);
+
+  // Normalise quaternion
+  norm = sqrt(q1 * q1 + q2 * q2 + q3 * q3 + q4 * q4);
+  norm = 1.0f / norm;
+  q[0] = q1 * norm;
+  q[1] = q2 * norm;
+  q[2] = q3 * norm;
+  q[3] = q4 * norm;
+
+  //return q;
+}
+
+
+void UpdateGyro(){
+	//Get magnetometer info
+	  //The magnetometer has a lower refresh rate than the accel & gyro, so the data ready register must be checked
+	  i2cBuff[0]= 0x02; //See if mag data is ready
+	  HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 1, 20);
+	  i2cBuff[1] = 0x00;
+	  HAL_I2C_Master_Receive(&hi2c1, ak8963Address, &i2cBuff[1], 1, 20);
+	  if (i2cBuff[1] & 0x01){
+		  //Get mag data
+		  i2cBuff[0]= 0x03; //Magnetometer address
+		  HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 1, 20);
+		  i2cBuff[1] = 0x00;
+		  HAL_I2C_Master_Receive(&hi2c1, ak8963Address, &i2cBuff[1], 7, 20);
+		  //See if magnetometer has overflowed
+		  if (!(i2cBuff[7] & 0x08)){
+			  mX = (i2cBuff[2]<<8  |  i2cBuff[1]);
+			  mY = (i2cBuff[4]<<8  |  i2cBuff[3]);
+			  mZ = (i2cBuff[6]<<8  |  i2cBuff[5]);
+			  //sprintf(dataTX, "Xmag = %d, Ymag = %d, Zmag = %d\r\n", mx, my, mz);
+			  //HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+		  }
+	  }
+
+	  //Get gyroscope and accelerometer info
+	  i2cBuff[0]= 0x3B; //Accelerometer addresses
+	  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
+	  i2cBuff[1] = 0x00;
+	  HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
+	  aX = (i2cBuff[1]<<8 | i2cBuff[2]);
+	  aY = (i2cBuff[3]<<8 | i2cBuff[4]);
+	  aZ = (i2cBuff[5]<<8 | i2cBuff[6]);
+	  gX = (i2cBuff[9]<<8  | i2cBuff[10]);
+	  gY = (i2cBuff[11]<<8 | i2cBuff[12]);
+	  gZ = (i2cBuff[13]<<8 | i2cBuff[14]);
+
+	  //Subtract offsets
+	  gX -=  gxOff;
+	  gY -=  gyOff;
+	  gZ -=  gzOff;
+	  aX -=  axOff;
+	  aY -=  ayOff;
+	  aZ -=  azOff;
+	  mX -=  mxOff;
+	  mY -=  myOff;
+	  mZ -=  mzOff;
+
+	  //Convert accelerations to g's
+	  Xacc = ((float)aX / 32768.0) * 2.0;
+	  Yacc = ((float)aY / 32768.0) * 2.0;
+	  Zacc = ((float)aZ / 32768.0) * 2.0;
+
+	  //Convert angular velocities to radians per second
+	  XangVel = ((float)gX / 32768.0) * 250.0 * (3.141592 / 180.0);
+	  YangVel = ((float)gY / 32768.0) * 250.0 * (3.141592 / 180.0);
+	  ZangVel = ((float)gZ / 32768.0) * 250.0 * (3.141592 / 180.0);
+
+	  //Convert magnetometer readings to milliGauss
+	  Xmag = ((float)mX / 32768.0) * 49120.0 * mxScale;
+	  Ymag = ((float)mY / 32768.0) * 49120.0 * myScale;
+	  Zmag = ((float)mZ / 32768.0) * 49120.0 * mzScale;
+
+	  //Get the time since the last MPU read
+	  mainCountCurr = (uint32_t)__HAL_TIM_GET_COUNTER(&htim4); //Using timer 1 for testing
+	  mainCount = mainCountCurr - mainCountPrev;
+	  if (mainCount > 66000){
+		  mainCount = mainCount + 65535; //Make mainCount positive if the timer rolled over
+	  }
+	  mainCountPrev = mainCountCurr;
+	  mainCount = (mainCount * 64) / 8; //Main loop time in us
+	  float time = (float) mainCount / 1000000; //Find time for quaternion filter in seconds
+
+	  // Sensors x (y)-axis of the accelerometer is aligned with the y (x)-axis of
+	  // the magnetometer; the magnetometer z-axis (+ down) is opposite to z-axis
+	  // (+ up) of accelerometer and gyro! We have to make some allowance for this
+	  // orientation mismatch in feeding the output to the quaternion filter. For the
+	  // MPU-9250, we have chosen a magnetic rotation that keeps the sensor forward
+	  // along the x-axis just like in the LSM9DS0 sensor. This rotation can be
+	  // modified to allow any convenient orientation convention. This is ok by
+	  // aircraft orientation standards! Pass gyro rate as rad/s
+	  MahonyQuaternionUpdate(Xacc, Yacc, Zacc, XangVel, YangVel, ZangVel, Xmag, Ymag, Zmag, time);
+
+	  //Find the Yaw, Pitch, and Roll from the Filter
+    //myIMU.yaw   = atan2(2.0f * (*(getQ()+1) * *(getQ()+2) + *getQ()* *(getQ()+3)), *getQ() * *getQ() + *(getQ()+1)* *(getQ()+1) - *(getQ()+2) * *(getQ()+2) - *(getQ()+3)* *(getQ()+3));
+    //myIMU.pitch = -asin(2.0f * (*(getQ()+1) * *(getQ()+3) - *getQ()* *(getQ()+2)));
+    //myIMU.roll  = atan2(2.0f * (*getQ() * *(getQ()+1) + *(getQ()+2)* *(getQ()+3)), *getQ() * *getQ() - *(getQ()+1)* *(getQ()+1) - *(getQ()+2) * *(getQ()+2) + *(getQ()+3)* *(getQ()+3));
+
+    yaw   = atan2(2.0 * (q[1] * q[2] + q[0] * q[3]), q[0] * q[0] + q[1] * q[1] - q[2] * q[2] - q[3] * q[3]);
+    pitch = -asin(2.0 * (q[1] * q[3] - q[0] * q[2]));
+    roll  = atan2(2.0 * (q[0] * q[1] + q[2] * q[3]), q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3]);
+
+    //Convert to degrees
+    yaw   *= (180.0 / 3.141592);
+    pitch *= (180.0 / 3.141592);
+    roll  *= (180.0 / 3.141592);
+
+	  /*//Find angle from direction of gravitational acceleration
+	  XaccAng = atan2(Yacc, sqrt((Xacc * Xacc) + (Zacc * Zacc))) * 57.2958;
+	  YaccAng = -atan2(Xacc, sqrt((Yacc * Yacc) + (Zacc * Zacc))) * 57.2958;
+	  ZaccAng = atan2(Zacc, sqrt((Xacc * Xacc) + (Yacc * Yacc))) * 57.2958;
+
+	  //Find angle from direction of gravitational acceleration using other formula
+	  //XaccAng = atan2(Yacc, Zacc) * 57.2958;
+	  //YaccAng = atan2(Xacc, Zacc) * 57.2958;
+	  //ZaccAng = atan2(Xacc, Yacc) * 57.2958;
+
+	  //Find degrees turned since last read
+	  XDegree = XangVel * ((float)mainCount / 1000000); //Using a sampling rate of 10 ms
+	  YDegree = YangVel * ((float)mainCount / 1000000); //Main loop seems to take an extra 4 ms
+	  ZDegree = ZangVel * ((float)mainCount / 1000000);
+
+	    XDegree = XangVel * 0.013; //Using a sampling rate of 10 ms
+	    YDegree = YangVel * 0.013; //Main loop seems to take an extra 4 ms
+	  	ZDegree = ZangVel * 0.013;
+
+	  //Integrate angular velocities
+	  XgyroAng += XDegree;
+	  YgyroAng += YDegree;
+	  ZgyroAng += ZDegree;
+
+	  //Get the filtered angles
+	  Xang = ((1.0 - alpha) * (Xang + XDegree)) + (alpha * XaccAng);
+	  Yang = ((1.0 - alpha) * (Yang + YDegree)) + (alpha * YaccAng);
+	  Zang = ((1.0 - alpha) * (Zang + ZDegree)) + (alpha * ZaccAng);*/
+}
+
+
 /* USER CODE END 4 */
 
 /**
