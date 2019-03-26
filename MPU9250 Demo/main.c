@@ -88,7 +88,7 @@ static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
-
+void SendInterruptMessage();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -236,6 +236,7 @@ int main(void)
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3); // Start wheel motor PWM
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3); // Start brake servo PWM
   HAL_Delay(1000);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0);    // 0 means no interrupt
   __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);    // 0 is implied that the wheel is not active
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700);  // 700 implies the brake is not active
 
@@ -326,7 +327,9 @@ int main(void)
   myScale = 0.90;
   mzScale = 1.06;
 
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 1500); // 1500 creates an interrupt every 12 ms
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 2999); // 1500 creates an interrupt every 12 ms
+  HAL_TIM_Base_Start_IT(&htim4);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -336,6 +339,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+	  //UpdateGyro();
 
 	  //For testing
 	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, 1);
@@ -1019,6 +1024,16 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
 }
 
 /* USER CODE BEGIN 4 */
@@ -1029,6 +1044,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	__NOP();
 }
 
+void SendInterruptMessage(){
+	  sprintf(dataTX, "Interrupt Triggered\r\n");
+	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+}
 
 // Similar to Madgwick scheme but uses proportional and integral filtering on
 // the error between estimated reference vectors and measured ones.
@@ -1189,14 +1208,14 @@ void UpdateGyro(){
 	  Zmag = ((float)mZ / 32768.0) * 49120.0 * mzScale;
 
 	  //Get the time since the last MPU read
-	  mainCountCurr = (uint32_t)__HAL_TIM_GET_COUNTER(&htim4); //Using timer 1 for testing
+	  /*mainCountCurr = (uint32_t)__HAL_TIM_GET_COUNTER(&htim4); //Using timer 1 for testing
 	  mainCount = mainCountCurr - mainCountPrev;
 	  if (mainCount > 66000){
 		  mainCount = mainCount + 65535; //Make mainCount positive if the timer rolled over
 	  }
 	  mainCountPrev = mainCountCurr;
 	  mainCount = (mainCount * 64) / 8; //Main loop time in us
-	  float time = (float) mainCount / 1000000; //Find time for quaternion filter in seconds
+	  float time = (float) mainCount / 1000000; //Find time for quaternion filter in seconds*/
 
 	  // Sensors x (y)-axis of the accelerometer is aligned with the y (x)-axis of
 	  // the magnetometer; the magnetometer z-axis (+ down) is opposite to z-axis
@@ -1206,7 +1225,7 @@ void UpdateGyro(){
 	  // along the x-axis just like in the LSM9DS0 sensor. This rotation can be
 	  // modified to allow any convenient orientation convention. This is ok by
 	  // aircraft orientation standards! Pass gyro rate as rad/s
-	  MahonyQuaternionUpdate(Xacc, Yacc, Zacc, XangVel, YangVel, ZangVel, Xmag, Ymag, Zmag, time);
+	  MahonyQuaternionUpdate(Xacc, Yacc, Zacc, XangVel, YangVel, ZangVel, Xmag, Ymag, Zmag, 0.012/*time*/);
 
 	  //Find the Yaw, Pitch, and Roll from the Filter
     //myIMU.yaw   = atan2(2.0f * (*(getQ()+1) * *(getQ()+2) + *getQ()* *(getQ()+3)), *getQ() * *getQ() + *(getQ()+1)* *(getQ()+1) - *(getQ()+2) * *(getQ()+2) - *(getQ()+3)* *(getQ()+3));
