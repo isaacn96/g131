@@ -88,13 +88,19 @@ static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
+
 void SendInterruptMessage();
+void UpdatePID();
+void UpdateGyro();
+void MahonyQuaternionUpdate(float ax, float ay, float az, float gx, float gy, float gz, float mx, float my, float mz, float deltat);
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-//Stuff for cube flip
+// Stuff for cube flip
 int pwm_esc1 = 0;
 int pwm_esc2 = 0;
 int pwm_esc3 = 0;
@@ -104,15 +110,21 @@ int pwm_servo2 = 0;
 int pwm_servo3 = 0;
 int dummy = 0;
 
-//Stuff for loop time
+// Stuff for PID
+float ki, kp, kd;
+float yawError, pitchError, rollError;
+float yawPrev, pitchPrev, rollPrev;
+
+
+// Stuff for loop time
 uint8_t sendCount;
 uint32_t mainCountPrev, mainCountCurr, mainCount;
 
-//Stuff for Bluetooth
+// Stuff for Bluetooth
 uint8_t dataRX[6];
 uint8_t dataTX[100];
 
-//Stuff for MPU and AK
+// Stuff for MPU and AK
 uint8_t i2cBuff[15];
 uint16_t mpu6050Address = 0xD0;
 uint16_t ak8963Address = 0x18;
@@ -139,7 +151,7 @@ uint8_t outstrX[10];
 uint8_t outstrY[10];
 uint8_t outstrZ[10];
 
-//Stuff for printing the angles
+// Stuff for printing the angles
 char *XSign, *YSign, *ZSign;
 float XVal, YVal, ZVal;
 int XInt1, YInt1, ZInt1;
@@ -182,10 +194,10 @@ float GyroMeasDrift = 3.141592 * (0.0f  / 180.0f);
 // fusion scheme.
 
 // Beta and zeta are not needed for the Mahony Filter
-//float beta = sqrt(3.0f / 4.0f) * GyroMeasError;   // Compute beta
+// float beta = sqrt(3.0f / 4.0f) * GyroMeasError;   // Compute beta
 // Compute zeta, the other free parameter in the Madgwick scheme usually
 // set to a small or zero value
-//float zeta = sqrt(3.0f / 4.0f) * GyroMeasDrift;
+// float zeta = sqrt(3.0f / 4.0f) * GyroMeasDrift;
 
 // Vector to hold integral error for Mahony method
 float eInt[3] = {0.0f, 0.0f, 0.0f};
@@ -240,43 +252,43 @@ int main(void)
   __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);    // 0 is implied that the wheel is not active
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700);  // 700 implies the brake is not active
 
-  //Wake up MPU
+  // Wake up MPU
   i2cBuff[0] = 0x6B;
   i2cBuff[1] = 0x00;
   HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
 
-  //Set Gyro Range to +/- 250 deg/sec
+  // Set Gyro Range to +/- 250 deg/sec
   i2cBuff[0] = 0x27;
   i2cBuff[1] = 0x00;
   HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
 
-  //Set Accel Range to +/- 2g
+  // Set Accel Range to +/- 2g
   i2cBuff[0] = 0x1C;
   i2cBuff[1] = 0x00;
   HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
 
-  //Enable i2c bypass on mpu9250
+  // Enable i2c bypass on mpu9250
   i2cBuff[0] = 0x37;
   i2cBuff[1] = 0x02;
   HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 2, 100);
 
-  //Find the factory-measured magnetometer sensitivity values
-  //Enter Fuse ROM Access Mode
+  // Find the factory-measured magnetometer sensitivity values
+  // Enter Fuse ROM Access Mode
   i2cBuff[0] = 0x0A;
   i2cBuff[1] = 0x0F;
   HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 2, 100);
-  //Get sensitivity values
+  // Get sensitivity values
   i2cBuff[0] = 0x10;
   HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
   i2cBuff[1] = 0x00;
   HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 3, 20);
 
-  //Calculate sensitivities from the raw values
+  // Calculate sensitivities from the raw values
   mxSens = ((float)(i2cBuff[1] - 128) / 256.0) + 1.0;
   mySens = ((float)(i2cBuff[2] - 128) / 256.0) + 1.0;
   mzSens = ((float)(i2cBuff[3] - 128) / 256.0) + 1.0;
 
-  //For testing
+  // For testing
   /*XSign = (mxSens < 0) ? "-" : " ";
   XVal = (mxSens < 0) ? -mxSens : mxSens;
   XInt1 = XVal;                      // Get the integer
@@ -421,6 +433,7 @@ int main(void)
 	  //Calibrate
 	  if (strcmp(dataRX, "CALB\r\n") == 0) {
 	  //Send confirmation to Bluetooth
+		  HAL_TIM_Base_Stop_IT(&htim4); // Stop gyro interrupt
 		  sprintf(dataRX, "______");
 		  sprintf(dataTX, "Calibration Starting....\r\n");
 		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
@@ -464,7 +477,7 @@ int main(void)
 
 		      axOff += aX;
 		      ayOff += aY;
-		      azOff += aZ;
+		      azOff += (aZ - 16384);
 		      gxOff += gX;
 		      gyOff += gY;
 		      gzOff += gZ;
@@ -552,7 +565,7 @@ int main(void)
 				  mxOff, myOff, mzOff, mxScale_temp, myScale_temp, mzScale_temp);
 		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 
-
+		  HAL_TIM_Base_Start_IT(&htim4); // Restart gyro interrupt
 		  sprintf(dataRX, "______");
 	  }
 
@@ -1044,6 +1057,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	__NOP();
 }
 
+void UpdatePID(){
+
+}
+
 void SendInterruptMessage(){
 	  sprintf(dataTX, "Interrupt Triggered\r\n");
 	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
@@ -1240,6 +1257,9 @@ void UpdateGyro(){
     yaw   *= (180.0 / 3.141592);
     pitch *= (180.0 / 3.141592);
     roll  *= (180.0 / 3.141592);
+
+    // Correct yaw for magnetic declination
+    yaw -= 3.1;
 
 	  /*//Find angle from direction of gravitational acceleration
 	  XaccAng = atan2(Yacc, sqrt((Xacc * Xacc) + (Zacc * Zacc))) * 57.2958;
