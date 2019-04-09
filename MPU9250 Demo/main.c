@@ -67,6 +67,7 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
+TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
@@ -87,6 +88,7 @@ static void MX_USART1_UART_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
+static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
 
 void SendInterruptMessage();
@@ -94,6 +96,10 @@ void UpdatePID();
 void UpdateGyro();
 void MahonyQuaternionUpdate(float ax, float ay, float az, float gx, float gy, float gz, float mx, float my, float mz, float deltat);
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
+void GetSpeed();
+void UpdateMotorSpeed();
+void Increase_Overflow();
+float median(uint8_t n, float x[]);
 
 /* USER CODE END PFP */
 
@@ -110,14 +116,35 @@ int pwm_servo2 = 0;
 int pwm_servo3 = 0;
 int dummy = 0;
 
-// Stuff for PID
-float ki, kp, kd;
-float yawError, pitchError, rollError;
-float yawPrev, pitchPrev, rollPrev;
+uint16_t ServoMax = 600;
+uint16_t ServoMin = 750;
 
+uint16_t MotorMax = 500;
+volatile uint8_t dummy_count = 0;
+uint8_t timer1_Overflow = 0;
+uint16_t motorCount1, lastMotorCount;
+
+float freq1_Buff[5];
+float freq1_Buff_Copy[5];
+uint8_t sendCount = 0;
+
+// Stuff for PID
+uint8_t balancing = 0;
+float ki, kp, kd;
+float kp_servo, kd_servo, ki_servo;
+float yawError, pitchError, rollError;
+float yawErrorPrev, pitchErrorPrev, rollErrorPrev;
+float pitchErrorStep, rollErrorStep, yawErrorStep;
+
+//Stuff for finding wheel speed
+uint32_t count1 = 2;
+uint32_t countPrev1 = 1;
+uint32_t dummy1;
+int32_t stepCount1 = 600;
+float freq1 = 0;
 
 // Stuff for loop time
-uint8_t sendCount;
+uint8_t PID_sendCount;
 uint32_t mainCountPrev, mainCountCurr, mainCount;
 
 // Stuff for Bluetooth
@@ -241,16 +268,23 @@ int main(void)
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
 
-  //Begin PWM
+  //Initialize timers and interrupts
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4); // Start wheel speed measurements
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3); // Start wheel motor 1 PWM
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2); // Start wheel motor 2 PWM
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); // Start brake servo 1 PWM
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2); // Start brake servo 2 PWM
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4); // Start interrupt for gyroscope measurements
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3); // Start wheel motor PWM
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3); // Start brake servo PWM
   HAL_Delay(1000);
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0);    // 0 means no interrupt
-  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);    // 0 is implied that the wheel is not active
-  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700);  // 700 implies the brake is not active
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 32767);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0); // 0 is implied that the wheel is not active
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0); // 0 is implied that the wheel is not active
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, ServoMin); // 700 implies the brake is not active
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, ServoMin); // 700 implies the brake is not active
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0); // 1500 creates an interrupt every 12 ms
 
   // Wake up MPU
   i2cBuff[0] = 0x6B;
@@ -339,8 +373,25 @@ int main(void)
   myScale = 0.90;
   mzScale = 1.06;
 
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 2999); // 1500 creates an interrupt every 12 ms
+  //Set interrupts
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 625); // 1500 creates an interrupt every 12 ms
+
+  HAL_NVIC_SetPriority(TIM4_IRQn, 2, 2);
   HAL_TIM_Base_Start_IT(&htim4);
+
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, 0);
+  HAL_TIM_Base_Start_IT(&htim1);
+  HAL_NVIC_SetPriority(TIM1_UP_IRQn, 0, 0);
+
+  // EXT interrupt init
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 1, 1);
+  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 1, 1);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 1, 1);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
   /* USER CODE END 2 */
 
@@ -357,20 +408,77 @@ int main(void)
 	  //For testing
 	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, 1);
 
+	  //Change motor top speed
+	  if (strcmp(dataRX, "MSET\r\n") == 0) {
+		  sprintf(dataRX, "______");
+		  HAL_Delay(100);
+	  	  sprintf(dataTX, "Set the motor frequency value.\r\n");
+	  	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+	  	  while(strcmp(dataRX, "______") == 0){
+	  		 dummy_count++;
+	  	  }
+  		  MotorMax = ((dataRX[0] - 48) * 1000) + ((dataRX[1] - 48) * 100) +
+  				     ((dataRX[2] - 48) * 10) + ((dataRX[3] - 48) * 1);
+		  sprintf(dataTX, "Motor frequency set to %d\r\n", MotorMax);
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+	  }
+
+	  //Test Balancing
+	  if (strcmp(dataRX, "BLNC\r\n") == 0) {
+		  sprintf(dataRX, "______");
+		  sprintf(dataTX, "Starting balance test...\r\n");
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+	   	  pwm_esc1 = 400;
+		  //__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1);
+
+		  pitchErrorPrev = 0;
+		  balancing = 1;
+
+	  }
+
 	  //Test motor
 	  if (strcmp(dataRX, "TEST\r\n") == 0) {
 		  sprintf(dataRX, "______");
-	  	  sprintf(dataTX, "Testing Motors...\r\n");
+	  	  sprintf(dataTX, "Testing Motor 1...\r\n");
 	  	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 
 		  //Motor Test Code
-		  HAL_Delay(3000);
-		  for(pwm_esc1 = 350; pwm_esc1 <= 2499; pwm_esc1++ ){
-			  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1);
-			  HAL_Delay(15);
+		  HAL_Delay(1000);
+		  for(pwm_esc1 = 350; pwm_esc1 <= MotorMax; pwm_esc1++ ){
+			  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, pwm_esc1);
+			  HAL_Delay(30);
 		  }
+		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0);
 
+	  	  sprintf(dataTX, "Testing Motor 2...\r\n");
+	  	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+		  //Motor Test Code
+		  HAL_Delay(1000);
+		  for(pwm_esc1 = 350; pwm_esc2 <= MotorMax; pwm_esc2++ ){
+			  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc2);
+			  HAL_Delay(30);
+		  }
 		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
+
+	   	  /*if ((sendCount % 16) == 0){
+	   		sprintf(dataTX, "Frequency = %d\r\n", (int)freq1);
+	   		HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+	   	  }
+	   	  sendCount++;
+
+	   	  sprintf(dataTX, "Final Frequencies = %d, %d, %d, %d, %d\r\n", (int)freq1_Buff[4],
+	   			  (int)freq1_Buff[3], (int)freq1_Buff[2], (int)freq1_Buff[1], (int)freq1_Buff[0]);
+	   	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+	   	  pwm_esc1 = 0;
+		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1);
+	   	  HAL_Delay(200);
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, ServoMax);  //Activate brake
+		  HAL_Delay(500);
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, ServoMin);  //Deactivate brake*/
+
 		  sprintf(dataTX, "Test Finished!\r\n");
 		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 	  }
@@ -378,17 +486,30 @@ int main(void)
 	  //Test servo
       if (strcmp(dataRX, "SERV\r\n") == 0) {
 	  	  sprintf(dataRX, "______");
-	   	  sprintf(dataTX, "Testing Servo...\r\n");
+	   	  sprintf(dataTX, "Testing Servo 1...\r\n");
 	   	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 
-	  	  //Motor Test Code
-	  	  HAL_Delay(3000);
-	  	  for(pwm_servo1 = 700; pwm_servo1 >= 550; pwm_servo1-- ){
-	  		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, pwm_servo1);
-	  		  HAL_Delay(100);
+	  	  //Test Code
+	  	  HAL_Delay(1000);
+	  	  for(pwm_servo1 = ServoMin; pwm_servo1 >= ServoMax; pwm_servo1-- ){
+	  		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_servo1);
+	  		  HAL_Delay(50);
 	  	  }
 
-  		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 680);
+  		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, ServoMin);
+
+  		  sprintf(dataTX, "Testing Servo 2...\r\n");
+  		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+
+  		  //Motor Test Code
+  		  HAL_Delay(1000);
+  		  for(pwm_servo2 = ServoMin; pwm_servo2 >= ServoMax; pwm_servo2-- ){
+  			  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, pwm_servo2);
+  			  HAL_Delay(50);
+  		  }
+
+  		__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, ServoMin);
+
   		  sprintf(dataTX, "Test Finished!\r\n");
   		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
   	  }
@@ -399,26 +520,43 @@ int main(void)
 	   	  sprintf(dataTX, "Flipping Cube...\r\n");
 	   	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 
+	   	  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, 0);
+
 	  	  //Cube Flip Test Code
 		  HAL_Delay(5000);                                    //Small delay before flipping program begins
 		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700);  //Deactivate brake
 		  HAL_Delay(500);                                     //Small delay for timing purposes
 	   	  sprintf(dataTX, "Ramping up motor...\r\n");
 	   	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
-		  for (pwm_esc1 = 100; pwm_esc1 <= 2499; pwm_esc1++ ){
+
+	   	  /*for (pwm_esc1 = 100; pwm_esc1 <= MotorMax; pwm_esc1++ ){
 			  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1); //Slowly ramp wheel to max speed
 			  HAL_Delay(10);
-		  }
-		  //__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 1500); //Set wheel to max speed
+		  }                                                           //Set wheel to max speed*/
+
+	  	  pwm_esc1 = 2000;
+	  	  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1); //Ramp wheel to max speed
+	   	  while (freq1 <= MotorMax){
+		  	  pwm_esc1 = 2000;
+		  	  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1); //Ramp wheel to max speed
+	   	  }
+	   	  pwm_esc1 = 0;
+		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1);
+
 	   	  sprintf(dataTX, "About to flip...\r\n");
 	   	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
-		  HAL_Delay(12000);                                   //Gives 12 seconds for wheel to spin up
-		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);    //Cuts power to wheel
-		  HAL_Delay(20);                                      //Small delay so events don't overlap
+		  //HAL_Delay(1000);                                     //Gives 1 second for wheel to spin up
+		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1);    //Cuts power to wheel
+		  HAL_Delay(10);                                      //Small delay so events don't overlap
 		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 550);  //Activate brake
-		  HAL_Delay(1000);                                    //Waits 1 second for timing purposes
+		  HAL_Delay(140);                                     //Waits 1 second for timing purposes
 		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 700);  //Deactivate brake
+		  HAL_Delay(5);
+		  //HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, 1);
+		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 1000); //Reverse motor
+		  HAL_Delay(2000);
 		  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);    //Reset motor to normal running speed
+		  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, 0);
 
   		  sprintf(dataTX, "Test Finished!\r\n");
   		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
@@ -427,6 +565,12 @@ int main(void)
 	  //Get loop time
 	  if (strcmp(dataRX, "TIME\r\n") == 0) {
 		  sprintf(dataTX, "%lu\r\n", mainCount);
+		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+	  }
+
+	  //Get frequency
+	  if ((strcmp(dataRX, "FREQ\r\n") == 0) && (sendCount % 16)) {
+		  sprintf(dataTX, "Frequency = %d\r\n", /*(int)freq1*/ stepCount1);
 		  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
 	  }
 
@@ -769,6 +913,69 @@ static void MX_I2C1_Init(void)
 }
 
 /**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 800;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 65535;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+
+}
+
+/**
   * @brief TIM2 Initialization Function
   * @param None
   * @retval None
@@ -911,9 +1118,9 @@ static void MX_TIM4_Init(void)
 
   /* USER CODE END TIM4_Init 1 */
   htim4.Instance = TIM4;
-  htim4.Init.Prescaler = 64;
+  htim4.Init.Prescaler = 63;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 1500;
+  htim4.Init.Period = 1375;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
@@ -935,6 +1142,8 @@ static void MX_TIM4_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM4_Init 2 */
+
+
 
   /* USER CODE END TIM4_Init 2 */
 
@@ -1037,16 +1246,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
-
-  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
-
-  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
-
 }
 
 /* USER CODE BEGIN 4 */
@@ -1057,13 +1256,110 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	__NOP();
 }
 
-void UpdatePID(){
+void Increase_Overflow(){
+	timer1_Overflow++;
+}
 
+void GetSpeed(){
+	count1 = (uint32_t)__HAL_TIM_GET_COUNTER(&htim1); // Gets current counter value when interrupt is triggered
+
+	stepCount1 = count1 - countPrev1;
+	countPrev1 = count1;
+	stepCount1 += (32767 * timer1_Overflow);
+	timer1_Overflow = 0;
+}
+
+void UpdateMotorSpeed(){
+	float freq1_Buff_Copy[5];
+
+	freq1 = ((float)motorCount1 * 10.0); //Period of timer4 interrupt
+	lastMotorCount = motorCount1;
+	motorCount1 = 0;
+
+
+	//Take a running average
+	freq1_Buff[0] = freq1_Buff[1];
+	freq1_Buff[1] = freq1_Buff[2];
+	freq1_Buff[2] = freq1_Buff[3];
+	freq1_Buff[3] = freq1_Buff[4];
+	freq1_Buff[4] = freq1;
+
+	freq1_Buff_Copy[0] = freq1_Buff[0];
+	freq1_Buff_Copy[1] = freq1_Buff[1];
+	freq1_Buff_Copy[2] = freq1_Buff[2];
+	freq1_Buff_Copy[3] = freq1_Buff[3];
+	freq1_Buff_Copy[4] = freq1_Buff[4];
+
+	freq1 = median(5, freq1_Buff_Copy);
+}
+
+void UpdatePID(){
+	pwm_servo1 = ServoMin;
+	kp = -1500;
+	kp_servo = 15;
+
+	kd = -15000;
+	kd_servo = 2;
+
+	if(balancing == 1){
+   		if ((PID_sendCount % 16) == 0){
+   			YSign = (pitchError < 0) ? "-" : " ";
+   			YVal = (pitchError < 0) ? -pitchError : pitchError;
+   			YInt1 = YVal;                      // Get the integer
+   			YFrac = YVal - YInt1;              // Get fraction
+   			YInt2 = trunc(YFrac * 100);        // Turn into integer
+
+   			XSign = (pitchErrorStep < 0) ? "-" : " ";
+   			XVal = (pitchErrorStep < 0) ? -pitchErrorStep : pitchErrorStep;
+   			XInt1 = XVal;                      // Get the integer
+   			XFrac = XVal - XInt1;              // Get fraction
+   			XInt2 = trunc(XFrac * 100);        // Turn into integer
+
+   			sprintf(dataTX, "pitch= %s%d.%02d, pitch velocity= %s%d.%02d, motor= %d, servo= %d\r\n",
+   					YSign, YInt1, YInt2, XSign, XInt1, XInt2, pwm_esc1, pwm_servo1);
+   			HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+   		}
+   		PID_sendCount++;
+
+		pitchError = pitch - 45;
+		pitchErrorStep = pitchError - pitchErrorPrev;
+		pitchErrorPrev = pitchError;
+
+		//Find motor PWM
+	   	pwm_esc1 = (pitchError * kp) + (kd * pitchErrorStep);
+	   	if (pwm_esc1 < 0){
+	   		pwm_esc1 = 0; //Don't let the PWM go negative
+	   	}
+	   	if (pwm_esc1 > 2500){
+	   		pwm_esc1 = 2500; //Max PWM value is 2500
+	   	}
+
+	   	//Find servo brake PWM
+	   	pwm_servo1 = ServoMin - ((pitchError * kp_servo) + (kd_servo * pitchErrorStep));
+	   	if (pwm_servo1 > ServoMin){
+	   		pwm_servo1 = ServoMin; //Set highest PWM to servo min
+	   	}
+
+	   	if (pwm_servo1 < ServoMax){
+	   		pwm_servo1 = ServoMax; //Set lowest PWM to servo max
+	   	}
+
+		if ((pitchError > 20) || (pitchError < -20)){
+			balancing = 0; //Quit PID loop if cube falls over
+			pwm_esc1 = 0;
+		}
+
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pwm_esc1); //Set motor PWM
+		//__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, pwm_servo1);  //Set Brake
+
+	}
 }
 
 void SendInterruptMessage(){
-	  sprintf(dataTX, "Interrupt Triggered\r\n");
-	  HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+	if(HAL_I2C_IsDeviceReady(&hi2c1, mpu6050Address, 1, 10) != HAL_OK){
+		sprintf(dataTX, "MPU Disconnected\r\n");
+		HAL_UART_Transmit(&huart1, dataTX, strlen(dataTX), 1000);
+	}
 }
 
 // Similar to Madgwick scheme but uses proportional and integral filtering on
@@ -1167,15 +1463,15 @@ void UpdateGyro(){
 	//Get magnetometer info
 	  //The magnetometer has a lower refresh rate than the accel & gyro, so the data ready register must be checked
 	  i2cBuff[0]= 0x02; //See if mag data is ready
-	  HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 1, 20);
+	  HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 1, 2);
 	  i2cBuff[1] = 0x00;
-	  HAL_I2C_Master_Receive(&hi2c1, ak8963Address, &i2cBuff[1], 1, 20);
+	  HAL_I2C_Master_Receive(&hi2c1, ak8963Address, &i2cBuff[1], 1, 2);
 	  if (i2cBuff[1] & 0x01){
 		  //Get mag data
 		  i2cBuff[0]= 0x03; //Magnetometer address
-		  HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 1, 20);
+		  HAL_I2C_Master_Transmit(&hi2c1, ak8963Address, i2cBuff, 1, 2);
 		  i2cBuff[1] = 0x00;
-		  HAL_I2C_Master_Receive(&hi2c1, ak8963Address, &i2cBuff[1], 7, 20);
+		  HAL_I2C_Master_Receive(&hi2c1, ak8963Address, &i2cBuff[1], 7, 2);
 		  //See if magnetometer has overflowed
 		  if (!(i2cBuff[7] & 0x08)){
 			  mX = (i2cBuff[2]<<8  |  i2cBuff[1]);
@@ -1188,9 +1484,9 @@ void UpdateGyro(){
 
 	  //Get gyroscope and accelerometer info
 	  i2cBuff[0]= 0x3B; //Accelerometer addresses
-	  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 20);
+	  HAL_I2C_Master_Transmit(&hi2c1, mpu6050Address, i2cBuff, 1, 2);
 	  i2cBuff[1] = 0x00;
-	  HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 20);
+	  HAL_I2C_Master_Receive(&hi2c1, mpu6050Address, &i2cBuff[1], 14, 2);
 	  aX = (i2cBuff[1]<<8 | i2cBuff[2]);
 	  aY = (i2cBuff[3]<<8 | i2cBuff[4]);
 	  aZ = (i2cBuff[5]<<8 | i2cBuff[6]);
@@ -1242,7 +1538,7 @@ void UpdateGyro(){
 	  // along the x-axis just like in the LSM9DS0 sensor. This rotation can be
 	  // modified to allow any convenient orientation convention. This is ok by
 	  // aircraft orientation standards! Pass gyro rate as rad/s
-	  MahonyQuaternionUpdate(Xacc, Yacc, Zacc, XangVel, YangVel, ZangVel, Xmag, Ymag, Zmag, 0.012/*time*/);
+	  MahonyQuaternionUpdate(Xacc, Yacc, Zacc, XangVel, YangVel, ZangVel, Xmag, Ymag, Zmag, 0.005/*time*/);
 
 	  //Find the Yaw, Pitch, and Roll from the Filter
     //myIMU.yaw   = atan2(2.0f * (*(getQ()+1) * *(getQ()+2) + *getQ()* *(getQ()+3)), *getQ() * *getQ() + *(getQ()+1)* *(getQ()+1) - *(getQ()+2) * *(getQ()+2) - *(getQ()+3)* *(getQ()+3));
@@ -1291,6 +1587,29 @@ void UpdateGyro(){
 	  Zang = ((1.0 - alpha) * (Zang + ZDegree)) + (alpha * ZaccAng);*/
 }
 
+float median(uint8_t n, float x[]) {
+    float temp;
+    int i, j;
+    // the following two loops sort the array x in ascending order
+    for(i=0; i<n-1; i++) {
+        for(j=i+1; j<n; j++) {
+            if(x[j] < x[i]) {
+                // swap elements
+                temp = x[i];
+                x[i] = x[j];
+                x[j] = temp;
+            }
+        }
+    }
+
+    if(n%2==0) {
+        // if there is an even number of elements, return mean of the two elements in the middle
+        return((x[n/2] + x[n/2 - 1]) / 2.0);
+    } else {
+        // else return the element in the middle
+        return x[n/2];
+    }
+}
 
 /* USER CODE END 4 */
 
